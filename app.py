@@ -8,6 +8,9 @@ from dotenv import load_dotenv
 import os
 from itsdangerous import URLSafeTimedSerializer, BadSignature
 from datetime import datetime, timezone
+from sib_api_v3_sdk import Configuration, ApiClient, TransactionalEmailsApi
+from sib_api_v3_sdk.models.send_smtp_email import SendSmtpEmail
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -48,6 +51,12 @@ class ConnectionDetails(db.Model):
     isPrimary = db.Column(db.Boolean, default=False, nullable=False)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.now(timezone.utc))
 
+class PasswordResetToken(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    token = db.Column(db.String(255), unique=True, nullable=False)
+    used = db.Column(db.Boolean, default=False, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.now(timezone.utc), nullable=False)
 
 # Create the database
 with app.app_context():
@@ -94,44 +103,82 @@ def login():
     token = serializer.dumps({'user_id': user.id}, salt=os.getenv('SECURITY_PASSWORD_SALT'))
     return jsonify({'message': 'Login successful', 'token': token}), 200
 
-# Forgot Password endpoint
+def generate_reset_token(user_email):
+    serializer = URLSafeTimedSerializer(os.getenv('SECRET_KEY'))
+    return serializer.dumps({'user_email': user_email}, salt=os.getenv('SECURITY_PASSWORD_SALT'))
+
 @app.route('/forgot-password', methods=['POST'])
 def forgot_password():
     data = request.get_json()
     email = data.get('email')
-
     user = User.query.filter_by(email=email).first()
+    
     if not user:
-        return jsonify({'message': 'Email not found'}), 404
-    
-    # Generate token
-    serializer = URLSafeTimedSerializer(os.getenv('SECRET_KEY'))
-    token = serializer.dumps(user.email, salt=os.getenv('SECURITY_PASSWORD_SALT'))
-    
-    # Send password reset email
+        return jsonify({'message': 'User not found'}), 404
+
+    token = generate_reset_token(user.email)
+    reset_entry = PasswordResetToken(user_id=user.id, token=token)
+    db.session.add(reset_entry)
+    db.session.commit()
+
     sender_email = os.getenv('SENDER_EMAIL')
-    receiver_email = email
-    password = os.getenv('EMAIL_PASSWORD')
-    smtp_server = os.getenv('SMTP_SERVER')
-    smtp_port = os.getenv('SMTP_PORT')
-    print(sender_email, receiver_email, password, smtp_server, smtp_port)
-    message = MIMEMultipart("alternative")
-    message["Subject"] = "Password Reset Request"
-    message["From"] = sender_email
-    message["To"] = receiver_email
-
-    text = f"Hi {user.name},\n\nTo reset your password, please click the link below:\n\nhttp://localhost:3000/reset-password?token={token}\n\nIf you did not request a password reset, please ignore this email."
-    part = MIMEText(text, "plain")
-    message.attach(part)
-
+    sendinblue_api_key = os.getenv('SENDINBLUE_API_KEY')
+    configuration = Configuration()
+    configuration.api_key['api-key'] = sendinblue_api_key
+    api_instance = TransactionalEmailsApi(ApiClient(configuration))
+    to = [{'email': email}]
+    subject = "Password Reset Request"
+    html_content = f"""
+    <p>Hi {user.name},</p>
+    <p>To reset your password, click the link below:</p>
+    <p><a href='http://localhost:5173/reset-password/{token}'>Reset Password</a></p>
+    <p>If you didn't request this, ignore this email.</p>
+    """
+    send_smtp_email = SendSmtpEmail(sender={'email': sender_email}, to=to, subject=subject, html_content=html_content)
     try:
-        with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
-            server.login(sender_email, password)
-            server.sendmail(sender_email, receiver_email, message.as_string())
+        api_instance.send_transac_email(send_smtp_email)
         return jsonify({'message': 'Password reset email sent'}), 200
     except Exception as e:
-        print("Failed to send email:", str(e))
         return jsonify({'message': 'Failed to send email', 'error': str(e)}), 500
+    
+    # Function to Verify Token
+def verify_reset_token(token, expiration=3600):  # 1 hour expiration
+    serializer = URLSafeTimedSerializer(os.getenv('SECRET_KEY'))
+    try:
+        data = serializer.loads(token, salt=os.getenv('SECURITY_PASSWORD_SALT'), max_age=expiration)
+        return data['user_email']
+    except Exception:
+        return None
+
+
+
+# Reset Password API
+@app.route('/reset-password', methods=['POST'])
+def reset_password():
+    data = request.get_json()
+    token = data.get('token')
+    new_password = data.get('password')
+
+    if not token or not new_password:
+        return jsonify({'message': 'Token and new password are required'}), 400
+
+    reset_entry = PasswordResetToken.query.filter_by(token=token).first()
+    if not reset_entry or reset_entry.used:
+        return jsonify({'message': 'Invalid or expired token'}), 400
+
+    try:
+        decoded = verify_reset_token(token)
+        user = User.query.filter_by(email=decoded).first()
+        if not user:
+            return jsonify({'message': 'User not found'}), 404
+
+        user.password =new_password
+        reset_entry.used = True
+        db.session.commit()
+
+        return jsonify({'message': 'Password reset successful'}), 200
+    except Exception:
+        return jsonify({'message': 'Invalid or expired token'}),400
 
 # Test DB Connection endpoint
 @app.route('/testdbcon', methods=['POST'])

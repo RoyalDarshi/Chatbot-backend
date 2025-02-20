@@ -1,2 +1,11 @@
-Lib/
+# Ignore the lib directory (if it's auto-generated)
+lib/
+
+# Ignore environment files (but keep an example)
 .env
+!.env.example
+
+# Ignore database files
+*.db
+var/app-instance/users.db
+

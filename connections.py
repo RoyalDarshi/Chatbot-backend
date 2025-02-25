@@ -2,8 +2,8 @@
 from flask import jsonify
 from models import ConnectionDetails
 
-# def test_db_connection():
-#     return jsonify({'message': 'Connection made successfully'}), 200
+def test_db_connection():
+    return jsonify({'message': 'Connection made successfully'}), 200
 
 def create_db_connection(db, request, URLSafeTimedSerializer, os, datetime, timezone, BadSignature):
     data = request.get_json()

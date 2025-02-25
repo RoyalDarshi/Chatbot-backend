@@ -1,0 +1,7 @@
+Flask
+Flask-SQLAlchemy
+Flask-CORS
+python-dotenv
+itsdangerous
+sib-api-v3-sdk
+cx_Oracle

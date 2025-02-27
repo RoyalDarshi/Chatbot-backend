@@ -2,6 +2,19 @@
 from flask import jsonify
 from sib_api_v3_sdk import Configuration, ApiClient, TransactionalEmailsApi
 from sib_api_v3_sdk.models.send_smtp_email import SendSmtpEmail
+from itsdangerous import URLSafeTimedSerializer
+import bcrypt
+import os
+
+def hash_password(password):
+    """Hashes a password using bcrypt."""
+    salt = bcrypt.gensalt()
+    hashed_password = bcrypt.hashpw(password.encode('utf-8'), salt)
+    return hashed_password
+
+def verify_password(password, hashed_password):
+    """Verifies a password against a hashed password."""
+    return bcrypt.checkpw(password.encode('utf-8'), hashed_password)
 
 def signup(db, request, URLSafeTimedSerializer, os):
     data = request.get_json()
@@ -13,7 +26,8 @@ def signup(db, request, URLSafeTimedSerializer, os):
     if db.session.query(db.Model.metadata.tables['user']).filter_by(email=email).first():
         return jsonify({'message': 'Email already exists'}), 400
     from models import User
-    new_user = User(name=name, email=email, password=password)
+    hashed_password = hash_password(password)
+    new_user = User(name=name, email=email, password=hashed_password)
     db.session.add(new_user)
     db.session.commit()
     serializer = URLSafeTimedSerializer(os.getenv('SECRET_KEY'))
@@ -28,8 +42,7 @@ def login(db, request, URLSafeTimedSerializer, os):
     user = db.session.query(User).filter_by(email=email).first()
     if not user:
         return jsonify({'message': 'User not registered'}), 404
-    user = db.session.query(User).filter_by(email=email, password=password).first()
-    if not user:
+    if not verify_password(password, user.password):
         return jsonify({'message': 'Invalid credentials'}), 401
     serializer = URLSafeTimedSerializer(os.getenv('SECRET_KEY'))
     token = serializer.dumps({'user_id': user.id}, salt=os.getenv('SECURITY_PASSWORD_SALT'))
@@ -52,12 +65,12 @@ def forgot_password(db, request, URLSafeTimedSerializer, os, send_reset_email):
     db.session.commit()
     try:
         send_reset_email(
-        user.email, user.name, token)
+            user.email, user.name, token)
         return jsonify({'message': 'Password reset email sent'}), 200
     except Exception as e:
         return jsonify({'message': 'Failed to send email', 'error': str(e)}), 500
 
-def verify_reset_token(token, URLSafeTimedSerializer, os, expiration=3600):
+def verify_reset_token(token, expiration=3600):
     serializer = URLSafeTimedSerializer(os.getenv('SECRET_KEY'))
     try:
         data = serializer.loads(token, salt=os.getenv('SECURITY_PASSWORD_SALT'), max_age=expiration)
@@ -84,7 +97,8 @@ def reset_password(db, request, verify_reset_token):
         if not user:
             return jsonify({'message': 'User not found'}), 404
 
-        user.password = new_password
+        hashed_password = hash_password(new_password)
+        user.password = hashed_password
         reset_entry.used = True
         db.session.commit()
 

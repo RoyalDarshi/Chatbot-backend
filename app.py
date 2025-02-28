@@ -9,7 +9,7 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature
 
 from auth import signup, login, forgot_password, reset_password, verify_reset_token
 # from testdb import test_db_connection
-from connections import test_db_connection, create_db_connection, get_user_connections, set_primary_connection, unset_primary_connection
+from connections import test_db_connection, create_db_connection, get_user_connections
 from utils import send_reset_email
 from models import db #import the db instance.
 
@@ -58,13 +58,6 @@ def create_db_connection_route():
 def get_user_connections_route():
     return get_user_connections(db, request, URLSafeTimedSerializer, os, BadSignature, datetime)
 
-@app.route('/setprimary', methods=['POST'])
-def set_primary_connection_route():
-    return set_primary_connection(db, request, URLSafeTimedSerializer, os, BadSignature)
-
-@app.route('/unsetprimary', methods=['POST'])
-def unset_primary_connection_route():
-    return unset_primary_connection(db, request, URLSafeTimedSerializer, os, BadSignature)
 
 
 if __name__ == '__main__':

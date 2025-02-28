@@ -23,12 +23,7 @@ class ConnectionDetails(db.Model):
     maxTransportObjects = db.Column(db.String(10))
     username = db.Column(db.String(120), nullable=False)
     password = db.Column(db.String(120), nullable=False)
-    applicationName = db.Column(db.String(120))
-    clientAccountingInformation = db.Column(db.String(120))
-    clientHostname = db.Column(db.String(120))
-    clientUser = db.Column(db.String(120))
     selectedDB = db.Column(db.String(120), nullable=False)
-    isPrimary = db.Column(db.Boolean, default=False, nullable=False)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.now(timezone.utc))
 
 class PasswordResetToken(db.Model):

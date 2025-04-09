@@ -4,4 +4,7 @@ Flask-CORS
 python-dotenv
 itsdangerous
 sib-api-v3-sdk
-cx_Oracle
+ldap3
+bcrypt
+google-auth
+requests

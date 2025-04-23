@@ -9,3 +9,4 @@ lib/
 *.db
 var/app-instance/users.db
 
+demo/

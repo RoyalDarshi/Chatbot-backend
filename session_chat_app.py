@@ -547,7 +547,7 @@ def get_session(session_id):
     if not session:
         return jsonify({"error": "Session not found or unauthorized"}), 404
 
-    messages = Message.query.filter_by(session_id=session_id).order_by(Message.timestamp.asc()).all()
+    messages = Message.query.filter_by(session_id=session_id).all()
     messages_list = [
         {
             "id": msg.id,
@@ -622,6 +622,9 @@ def create_message():
         timestamp=datetime.utcnow(),
         is_favorited=is_favorited
     )
+    favorite = Favorite.query.filter_by(question_content=content, uid=uid).first()
+    if favorite:
+        favorite.count += 1
     db.session.add(message)
     db.session.commit()
     return jsonify({

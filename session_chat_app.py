@@ -569,6 +569,32 @@ def get_session(session_id):
         "messages": messages_list
     }), 200
 
+# Route to update a session
+@app.route('/api/sessions/<session_id>', methods=['PUT'])
+@token_required
+def update_session(session_id):
+    data = request.get_json()
+    uid = request.uid
+    title = data.get('title')
+    if not uid:
+        return jsonify({"error": "Invalid token, UID required"}), 401
+    if not title:
+        return jsonify({"error": "Title is required"}), 400
+
+    session = Session.query.filter_by(id=session_id, uid=uid).first()
+    if not session:
+        return jsonify({"error": "Session not found or unauthorized"}), 404
+
+    session.title = title
+    session.updated_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({
+        "id": session.id,
+        "title": session.title,
+        "timestamp": session.timestamp.isoformat(),
+        "messages": []
+    }), 200
+
 # Route to delete a session
 @app.route('/api/sessions/<session_id>', methods=['DELETE'])
 @token_required

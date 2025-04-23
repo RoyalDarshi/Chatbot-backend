@@ -560,6 +560,8 @@ def get_session(session_id):
         }
         for msg in messages
     ]
+    session.timestamp = datetime.utcnow()
+    db.session.commit()
     return jsonify({
         "id": session.id,
         "title": session.title,
@@ -579,10 +581,7 @@ def delete_session(session_id):  # Added session_id parameter
     if not session:
         return jsonify({"error": "Session not found or unauthorized"}), 404
 
-    # Update favorite status for messages
-    for msg in session.messages:
-        msg.is_favorited = False
-        Favorite.query.filter_by(question_id=msg.id, uid=uid).delete()
+    # Delete all messages associated with the session
     Message.query.filter_by(session_id=session_id).delete()
     db.session.delete(session)
     db.session.commit()
@@ -725,14 +724,14 @@ def add_favorite():
 def get_favorites():
     try:
         uid = request.uid
-        favorites = Favorite.query.filter_by(uid=uid).all()
+        favorites = Favorite.query.filter_by(uid=uid).order_by(Favorite.count.desc()).all()
         favorites_list = [
             {
                 'question_id': fav.question_id,
                 'question': fav.question_content,
                 'query': fav.response_query,
                 'count': fav.count,
-                'isFavorited': bool(Message.query.filter_by(id=fav.question_id, is_favorited=True).first())
+                'isFavorited': True
             }
             for fav in favorites
         ]

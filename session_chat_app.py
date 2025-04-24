@@ -836,6 +836,28 @@ def force_delete_favorite():
         print(f"Error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/recommended_questions', methods=['POST'])
+@token_required
+def get_recommended_questions():
+    try:
+        uid = request.uid
+        recommended = Favorite.query.filter(
+            Favorite.uid == uid,
+            Favorite.count > 3
+        ).order_by(Favorite.count.desc()).limit(3).all()
+        recommended_list = [
+            {
+                'question_id': fav.question_id,
+                'question': fav.question_content,
+                'query': fav.response_query,
+                'count': fav.count
+            }
+            for fav in recommended
+        ]
+        return jsonify(recommended_list), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 
 # Run the application
 if __name__ == '__main__':

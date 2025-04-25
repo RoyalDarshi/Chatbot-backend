@@ -560,7 +560,6 @@ def get_session(session_id):
         }
         for msg in messages
     ]
-    session.timestamp = datetime.utcnow()
     db.session.commit()
     return jsonify({
         "id": session.id,
@@ -650,6 +649,7 @@ def create_message():
     favorite = Favorite.query.filter_by(question_content=content, uid=uid).first()
     if favorite:
         favorite.count += 1
+    session.timestamp = datetime.utcnow()
     db.session.add(message)
     db.session.commit()
     return jsonify({
@@ -680,7 +680,10 @@ def update_message(message_id):
         Message.id == message_id,
         Session.uid == uid
     ).first()
-    print(f"Message found: {message}")
+
+    session = Session.query.filter_by(id=message.session_id, uid=uid).first()
+    if not session:
+        return jsonify({"error": "Session not found or unauthorized"}), 404
     if not message:
         return jsonify({"error": "Message not found or unauthorized"}), 404
 
@@ -688,6 +691,7 @@ def update_message(message_id):
     message.is_favorited = False
     message.timestamp = datetime.utcnow()
     message.updated_at = datetime.utcnow()
+    session.timestamp = datetime.utcnow()
     db.session.commit()
     return jsonify({"message": "Message updated"}), 200
 

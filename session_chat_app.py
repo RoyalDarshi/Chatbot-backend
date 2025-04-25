@@ -496,7 +496,7 @@ def create_session():
     session = Session(
         uid=uid,
         title=title,
-        timestamp=datetime.now(timezone.utc)()
+        timestamp=datetime.now(timezone.utc)
     )
     db.session.add(session)
     db.session.commit()
@@ -592,7 +592,7 @@ def update_session(session_id):
         return jsonify({"error": "Session not found or unauthorized"}), 404
 
     session.title = title
-    session.updated_at = datetime.now(timezone.utc)()
+    session.updated_at = datetime.now(timezone.utc)
     db.session.commit()
     return jsonify({
         "id": session.id,
@@ -650,13 +650,13 @@ def create_message():
         content=content,
         is_bot=is_bot,
         parent_id=parent_id,
-        timestamp=datetime.now(timezone.utc)(),
+        timestamp=datetime.now(timezone.utc),
         is_favorited=is_favorited
     )
     favorite = Favorite.query.filter_by(question_content=content, uid=uid).first()
     if favorite:
         favorite.count += 1
-    session.timestamp = datetime.now(timezone.utc)()
+    session.timestamp = datetime.now(timezone.utc)
     db.session.add(message)
     db.session.commit()
     return jsonify({
@@ -698,9 +698,9 @@ def update_message(message_id):
 
     message.content = content
     message.is_favorited = False
-    message.timestamp = datetime.now(timezone.utc)()
-    message.updated_at = datetime.now(timezone.utc)()
-    session.timestamp = datetime.now(timezone.utc)()
+    message.timestamp = datetime.now(timezone.utc)
+    message.updated_at = datetime.now(timezone.utc)
+    session.timestamp = datetime.now(timezone.utc)
     db.session.commit()
     return jsonify({"message": "Message updated"}), 200
 

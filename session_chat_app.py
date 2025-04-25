@@ -9,6 +9,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from ldap3 import Server, Connection, ALL, SUBTREE, AUTO_BIND_TLS_BEFORE_BIND, Tls
 from ldap3.utils.conv import escape_filter_chars
 from ldap3.utils.dn import escape_rdn
+from datetime import datetime, timezone
 import ssl
 import json
 import os
@@ -48,9 +49,9 @@ class Session(db.Model):
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     uid = db.Column(db.String(255), nullable=False)
     title = db.Column(db.String(255), nullable=False)
-    timestamp = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    timestamp = db.Column(db.DateTime, nullable=False, default=datetime.now(timezone.utc))
+    created_at = db.Column(db.DateTime, default=datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 
 # Define the Message model
 class Message(db.Model):
@@ -59,10 +60,12 @@ class Message(db.Model):
     content = db.Column(db.Text, nullable=False)
     is_bot = db.Column(db.Boolean, default=False, nullable=False)
     is_favorited = db.Column(db.Boolean, default=False, nullable=False)
-    parent_id = db.Column(db.String(36), db.ForeignKey('message.id'), nullable=True)  # New field
-    timestamp = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    parent_id = db.Column(db.String(36), db.ForeignKey('message.id'), nullable=True)
+    reaction = db.Column(db.String(10), nullable=True)  # 'like', 'dislike', or null
+    dislike_reason = db.Column(db.Text, nullable=True)
+    timestamp = db.Column(db.DateTime, nullable=False, default=datetime.now(timezone.utc))
+    created_at = db.Column(db.DateTime, default=datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
     session = db.relationship('Session', backref=db.backref('messages', lazy=True))
     parent = db.relationship('Message', remote_side=[id], backref='responses')
 
@@ -75,8 +78,8 @@ class Favorite(db.Model):
     response_query = db.Column(db.String(500), nullable=True)
     uid = db.Column(db.String(255), nullable=False)
     count = db.Column(db.Integer, default=0)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 
 # Define the ConnectionDetails model
 class ConnectionDetails(db.Model):
@@ -493,7 +496,7 @@ def create_session():
     session = Session(
         uid=uid,
         title=title,
-        timestamp=datetime.utcnow()
+        timestamp=datetime.now(timezone.utc)()
     )
     db.session.add(session)
     db.session.commit()
@@ -526,6 +529,8 @@ def get_sessions():
                     "isFavorited": msg.is_favorited,
                     "parentId": msg.parent_id,
                     "timestamp": msg.timestamp.isoformat(),
+                    "reaction": msg.reaction,
+                    "dislike_reason": msg.dislike_reason,
                     "favoriteCount": Favorite.query.filter_by(question_id=msg.id, uid=uid).first().count if Favorite.query.filter_by(question_id=msg.id, uid=uid).first() else 0
                 }
                 for msg in session.messages
@@ -556,6 +561,8 @@ def get_session(session_id):
             "isFavorited": msg.is_favorited,
             "parentId": msg.parent_id,
             "timestamp": msg.timestamp.isoformat(),
+            "reaction": msg.reaction,
+            "dislike_reason": msg.dislike_reason,
             "favoriteCount": Favorite.query.filter_by(question_id=msg.id, uid=uid).first().count if Favorite.query.filter_by(question_id=msg.id, uid=uid).first() else 0
         }
         for msg in messages
@@ -585,7 +592,7 @@ def update_session(session_id):
         return jsonify({"error": "Session not found or unauthorized"}), 404
 
     session.title = title
-    session.updated_at = datetime.utcnow()
+    session.updated_at = datetime.now(timezone.utc)()
     db.session.commit()
     return jsonify({
         "id": session.id,
@@ -643,13 +650,13 @@ def create_message():
         content=content,
         is_bot=is_bot,
         parent_id=parent_id,
-        timestamp=datetime.utcnow(),
+        timestamp=datetime.now(timezone.utc)(),
         is_favorited=is_favorited
     )
     favorite = Favorite.query.filter_by(question_content=content, uid=uid).first()
     if favorite:
         favorite.count += 1
-    session.timestamp = datetime.utcnow()
+    session.timestamp = datetime.now(timezone.utc)()
     db.session.add(message)
     db.session.commit()
     return jsonify({
@@ -659,6 +666,8 @@ def create_message():
         "isFavorited": message.is_favorited,
         "parentId": message.parent_id,
         "timestamp": message.timestamp.isoformat(),
+        "reaction": message.reaction,
+        "dislike_reason": message.dislike_reason,
         "favoriteCount": 0
     }), 201
 
@@ -689,11 +698,50 @@ def update_message(message_id):
 
     message.content = content
     message.is_favorited = False
-    message.timestamp = datetime.utcnow()
-    message.updated_at = datetime.utcnow()
-    session.timestamp = datetime.utcnow()
+    message.timestamp = datetime.now(timezone.utc)()
+    message.updated_at = datetime.now(timezone.utc)()
+    session.timestamp = datetime.now(timezone.utc)()
     db.session.commit()
     return jsonify({"message": "Message updated"}), 200
+
+# Route to set message reaction
+@app.route('/api/messages/<message_id>/reaction', methods=['POST'])
+@token_required
+def set_message_reaction(message_id):
+    print(message_id)
+    data = request.get_json()
+    reaction = data.get('reaction')
+    dislike_reason = data.get('dislike_reason')
+    uid = request.uid
+
+    if not uid:
+        return jsonify({"error": "Invalid token, UID required"}), 401
+
+    message = Message.query.filter_by(id=message_id).first()
+    if not message:
+        return jsonify({"error": "Message not found"}), 404
+
+    session = Session.query.filter_by(id=message.session_id, uid=uid).first()
+    if not session:
+        return jsonify({"error": "Unauthorized access to message"}), 403
+
+    if not message.is_bot:
+        return jsonify({"error": "Can only set reaction for bot messages"}), 400
+
+    if reaction not in ['like', 'dislike', None]:
+        return jsonify({"error": "Invalid reaction value"}), 400
+
+    if reaction == 'dislike' and not dislike_reason:
+        return jsonify({"error": "Dislike reason is required when disliking"}), 400
+
+    message.reaction = reaction
+    if reaction == 'dislike':
+        message.dislike_reason = dislike_reason
+    else:
+        message.dislike_reason = None
+
+    db.session.commit()
+    return jsonify({"message": "Reaction set successfully"}), 200
 
 # Route to favorite a message
 @app.route('/favorite', methods=['POST'])
@@ -861,7 +909,6 @@ def get_recommended_questions():
         return jsonify(recommended_list), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
 
 # Run the application
 if __name__ == '__main__':

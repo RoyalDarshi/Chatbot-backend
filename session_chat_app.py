@@ -809,7 +809,8 @@ def get_favorites():
                 'question': fav.question_content,
                 'query': fav.response_query,
                 'count': fav.count,
-                'isFavorited': True
+                'isFavorited': True,
+                'timestamp': fav.updated_at,
             }
             for fav in favorites
         ]

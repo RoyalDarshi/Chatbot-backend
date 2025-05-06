@@ -416,17 +416,13 @@ def delete_connection():
     uid = request.uid
     email = request.user_email
 
+    # Determine if the request is from a user or an admin and fetch the connection
     if uid:
         connection = ConnectionDetails.query.filter_by(
             id=connection_id,
             uid=uid,
             isAdmin=False
         ).first()
-        if not connection:
-            return jsonify({'message': 'Connection not found or not owned by user'}), 404
-        db.session.delete(connection)
-        db.session.commit()
-        return jsonify({'message': 'Connection deleted'}), 200
     elif email:
         admin = Admin.query.filter_by(email=email).first()
         connection = ConnectionDetails.query.filter_by(
@@ -434,13 +430,23 @@ def delete_connection():
             admin_id=admin.id,
             isAdmin=True
         ).first()
-        if not connection:
-            return jsonify({'message': 'Connection not found or not owned by admin'}), 404
-        db.session.delete(connection)
-        db.session.commit()
-        return jsonify({'message': 'Connection deleted'}), 200
     else:
         return jsonify({'message': 'Invalid token'}), 401
+
+    # Check if the connection exists and the user is authorized
+    if not connection:
+        return jsonify({'message': 'Connection not found or unauthorized'}), 404
+
+    # Delete the connection
+    db.session.delete(connection)
+
+    # Update all sessions and favorites that use this connection_name
+    Session.query.filter_by(connection_name=connection.connectionName).update({Session.connection_name: ''})
+    Favorite.query.filter_by(connection_name=connection.connectionName).update({Favorite.connection_name: ''})
+
+    # Commit all changes to the database
+    db.session.commit()
+    return jsonify({'message': 'Connection deleted'}), 200
 
 # Route to set LDAP configuration
 @app.route('/ldap-config', methods=['POST'])
@@ -579,7 +585,7 @@ def get_session(session_id):
     return jsonify({
         "id": session.id,
         "title": session.title,
-        "connection_name": session.connection_name,
+        "connection": session.connection_name,
         "timestamp": session.timestamp.isoformat(),
         "messages": messages_list
     }), 200
@@ -909,7 +915,8 @@ def get_recommended_questions():
         uid = request.uid
         recommended = Favorite.query.filter(
             Favorite.uid == uid,
-            Favorite.count > 3
+            Favorite.count > 3,
+            Favorite.connection_name !="",
         ).order_by(Favorite.count.desc()).limit(3).all()
         recommended_list = [
             {

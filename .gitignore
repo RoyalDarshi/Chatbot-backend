@@ -6,5 +6,8 @@ lib/
 !.env.example
 
 # Ignore database files
+*.db
 
 demo/
+
+

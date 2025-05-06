@@ -49,6 +49,7 @@ class Session(db.Model):
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     uid = db.Column(db.String(255), nullable=False)
     title = db.Column(db.String(255), nullable=False)
+    connection_name = db.Column(db.String(255), nullable=False)
     timestamp = db.Column(db.DateTime, nullable=False, default=datetime.now(timezone.utc))
     created_at = db.Column(db.DateTime, default=datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
@@ -76,6 +77,7 @@ class Favorite(db.Model):
     question_content = db.Column(db.String(500), nullable=False)
     response_id = db.Column(db.String(255), nullable=True)
     response_query = db.Column(db.String(500), nullable=True)
+    connection_name = db.Column(db.String(255), nullable=False)
     uid = db.Column(db.String(255), nullable=False)
     count = db.Column(db.Integer, default=0)
     created_at = db.Column(db.DateTime, default=datetime.now(timezone.utc))
@@ -493,9 +495,14 @@ def create_session():
     title = data.get('title')
     if not title:
         return jsonify({"error": "Title is required"}), 400
+    
+    connection=data.get('currentConnection')
+    if not connection:
+        return jsonify({"error": "Connection is required"}), 400
     session = Session(
         uid=uid,
         title=title,
+        connection_name=connection,
         timestamp=datetime.now(timezone.utc)
     )
     db.session.add(session)
@@ -520,6 +527,7 @@ def get_sessions():
         {
             "id": session.id,
             "title": session.title,
+            "connection": session.connection_name,
             "timestamp": session.timestamp.isoformat(),
             "messages": [
                 {
@@ -571,6 +579,7 @@ def get_session(session_id):
     return jsonify({
         "id": session.id,
         "title": session.title,
+        "connection_name": session.connection_name,
         "timestamp": session.timestamp.isoformat(),
         "messages": messages_list
     }), 200
@@ -751,6 +760,7 @@ def add_favorite():
         data = request.get_json()
         question_id = data.get('questionId')
         question_content = data.get('questionContent')
+        connection=data.get('currentConnection')
         uid = request.uid
 
         if not question_id or not uid or not question_content:
@@ -772,7 +782,7 @@ def add_favorite():
             response_message.is_favorited = True
 
         # Update favorite entry
-        favorite = Favorite.query.filter_by(question_content=question_content, uid=uid).first()
+        favorite = Favorite.query.filter_by(question_content=question_content, uid=uid,connection_name=connection).first()
         if favorite:
             favorite.count += 1
             favorite.question_content = question_content
@@ -784,6 +794,7 @@ def add_favorite():
                 question_content=question_content,
                 response_id=response_id,
                 response_query=response_query,
+                connection_name=connection,
                 count=1,
                 uid=uid
             )
@@ -810,6 +821,7 @@ def get_favorites():
                 'query': fav.response_query,
                 'count': fav.count,
                 'isFavorited': True,
+                'connection': fav.connection_name,
                 'timestamp': fav.updated_at,
             }
             for fav in favorites
@@ -826,9 +838,10 @@ def delete_favorite():
         data = request.get_json()
         question_id = data.get('questionId')
         uid = request.uid
+        current_connection = data.get('currentConnection')
         question_message = Message.query.filter_by(id=question_id).first()
         response_message = Message.query.filter_by(parent_id=question_id).first() 
-        favorite = Favorite.query.filter_by(question_content=question_message.content, uid=uid).first()
+        favorite = Favorite.query.filter_by(question_content=question_message.content, uid=uid,connection_name=current_connection).first()
         if not favorite:
             return jsonify({'error': 'Favorite not found'}), 404
 
@@ -903,7 +916,8 @@ def get_recommended_questions():
                 'question_id': fav.question_id,
                 'question': fav.question_content,
                 'query': fav.response_query,
-                'count': fav.count
+                'count': fav.count,
+                "connection": fav.connection_name,
             }
             for fav in recommended
         ]

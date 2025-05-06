@@ -6,7 +6,5 @@ lib/
 !.env.example
 
 # Ignore database files
-*.db
-var/app-instance/users.db
 
 demo/

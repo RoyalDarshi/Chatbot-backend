@@ -101,6 +101,14 @@ class ConnectionDetails(db.Model):
     isAdmin = db.Column(db.Boolean, default=False, nullable=False)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.now(timezone.utc))
 
+# Define the UserSettings model
+class UserSettings(db.Model):
+    uid = db.Column(db.String(255), primary_key=True)
+    theme = db.Column(db.String(10), default='light')
+    chat_font_size = db.Column(db.String(10), default='medium')
+    notifications_enabled = db.Column(db.Boolean, default=True)
+    auto_save_chats = db.Column(db.Boolean, default=True)
+
 # Drop and recreate tables (for development only, comment out in production)
 with app.app_context():
     # db.drop_all()
@@ -930,6 +938,49 @@ def get_recommended_questions():
         ]
         return jsonify(recommended_list), 200
     except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+@app.route('/api/user/settings', methods=['POST'])
+@token_required
+def get_user_settings():
+    try:
+        uid = request.uid
+        settings = UserSettings.query.filter_by(uid=uid).first()
+        if not settings:
+            # Create default settings if none exist
+            settings = UserSettings(uid=uid)
+            db.session.add(settings)
+            db.session.commit()
+        return jsonify({
+            'chatFontSize': settings.chat_font_size,
+            'notificationsEnabled': settings.notifications_enabled,
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/user/createsettings', methods=['POST'])
+@token_required
+def update_user_settings():
+    try:
+        data = request.get_json().get('settings', {})
+        print(data)
+        uid = request.uid
+        settings = UserSettings.query.filter_by(uid=uid).first()
+        if not settings:
+            settings = UserSettings(uid=uid)
+            db.session.add(settings)
+        if 'theme' in data:
+            settings.theme = data['theme']
+        if 'chatFontSize' in data:
+            settings.chat_font_size = data['chatFontSize']
+        if 'notificationsEnabled' in data:
+            settings.notifications_enabled = data['notificationsEnabled']
+        if 'autoSaveChats' in data:
+            settings.auto_save_chats = data['autoSaveChats']
+        db.session.commit()
+        return jsonify({'message': 'Settings updated'}), 200
+    except Exception as e:
+        db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
 # Run the application

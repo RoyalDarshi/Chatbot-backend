@@ -727,6 +727,34 @@ def update_message(message_id):
     db.session.commit()
     return jsonify({"message": "Message updated"}), 200
 
+# Route to get a message
+@app.route('/api/getmessages/<message_id>', methods=['POST'])
+@token_required
+def get_message(message_id):
+    uid = request.uid
+    if not uid:
+        return jsonify({"error": "Invalid token, UID required"}), 401
+
+    message = Message.query.filter_by(id=message_id).first()
+    if not message:
+        return jsonify({"error": "Message not found"}), 404
+
+    session = Session.query.filter_by(id=message.session_id, uid=uid).first()
+    if not session:
+        return jsonify({"error": "Unauthorized access to message"}), 403
+
+    response = {
+        "id": message.id,
+        "content": message.content,
+        "isBot": message.is_bot,
+        "isFavorited": message.is_favorited,
+        "parentId": message.parent_id,
+        "timestamp": message.timestamp.isoformat(),
+        "reaction": message.reaction,
+        "dislike_reason": message.dislike_reason
+    }
+    return jsonify(response), 200
+
 # Route to set message reaction
 @app.route('/api/messages/<message_id>/reaction', methods=['POST'])
 @token_required

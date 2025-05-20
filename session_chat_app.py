@@ -656,8 +656,8 @@ def create_message():
 
     if not uid:
         return jsonify({"error": "Invalid token, UID required"}), 401
-    if not session_id or not content:
-        return jsonify({"error": "Session ID and content are required"}), 400
+    if not session_id:
+        return jsonify({"error": "Session ID are required"}), 400
 
     session = Session.query.filter_by(id=session_id, uid=uid).first()
     if not session:
@@ -705,8 +705,8 @@ def update_message(message_id):
 
     if not uid:
         return jsonify({"error": "Invalid token, UID required"}), 401
-    if not content:
-        return jsonify({"error": "Content is required"}), 400
+    # if not content:
+    #     return jsonify({"error": "Content is required"}), 400
 
     message = Message.query.join(Session).filter(
         Message.id == message_id,

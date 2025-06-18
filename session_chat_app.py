@@ -60,7 +60,7 @@ class Message(db.Model):
     session_id = db.Column(db.String(36), db.ForeignKey('session.id'), nullable=False)
     content = db.Column(db.Text, nullable=False)
     is_bot = db.Column(db.Boolean, default=False, nullable=False)
-    is_favorited = db.Column(db.Boolean, default=False, nullable=False)
+    is_favorited = db.Column(db.Boolean, default=False, nullable=False) # Keep this flag for individual message status
     parent_id = db.Column(db.String(36), db.ForeignKey('message.id'), nullable=True)
     reaction = db.Column(db.String(10), nullable=True)  # 'like', 'dislike', or null
     dislike_reason = db.Column(db.Text, nullable=True)
@@ -73,15 +73,19 @@ class Message(db.Model):
 # Define the Favorite model
 class Favorite(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    question_id = db.Column(db.String(255), nullable=False)
+    question_id = db.Column(db.String(255), nullable=False) # This is the Message.id of the question message
     question_content = db.Column(db.String(500), nullable=False)
     response_id = db.Column(db.String(255), nullable=True)
     response_query = db.Column(db.String(500), nullable=True)
     connection_name = db.Column(db.String(255), nullable=False)
     uid = db.Column(db.String(255), nullable=False)
-    count = db.Column(db.Integer, default=0)
+    count = db.Column(db.Integer, default=0) # Represents popularity of this question content for this user
     created_at = db.Column(db.DateTime, default=datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
+    
+    # Add unique constraint to ensure one favorite entry per user per question content per connection
+    __table_args__ = (db.UniqueConstraint('question_content', 'connection_name', 'uid', name='_user_content_connection_uc'),)
+
 
 # Define the ConnectionDetails model
 class ConnectionDetails(db.Model):
@@ -537,29 +541,39 @@ def get_sessions():
         return jsonify({"error": "Invalid token, UID required"}), 401
 
     sessions = Session.query.filter_by(uid=uid).order_by(Session.timestamp.desc()).all()
-    sessions_list = [
-        {
+    sessions_list = []
+    for session in sessions:
+        messages_list = []
+        for msg in session.messages:
+            # Dynamically fetch favoriteCount for each user question message
+            favorite_count = 0
+            if not msg.is_bot: # Only user questions can be favorited
+                favorite_entry = Favorite.query.filter_by(
+                    question_content=msg.content,
+                    uid=uid,
+                    connection_name=session.connection_name # Assuming session connection is correct
+                ).first()
+                if favorite_entry:
+                    favorite_count = favorite_entry.count
+
+            messages_list.append({
+                "id": msg.id,
+                "content": msg.content,
+                "isBot": msg.is_bot,
+                "isFavorited": msg.is_favorited,
+                "parentId": msg.parent_id,
+                "timestamp": msg.timestamp.isoformat(),
+                "reaction": msg.reaction,
+                "dislike_reason": msg.dislike_reason,
+                "favoriteCount": favorite_count
+            })
+        sessions_list.append({
             "id": session.id,
             "title": session.title,
             "connection": session.connection_name,
             "timestamp": session.timestamp.isoformat(),
-            "messages": [
-                {
-                    "id": msg.id,
-                    "content": msg.content,
-                    "isBot": msg.is_bot,
-                    "isFavorited": msg.is_favorited,
-                    "parentId": msg.parent_id,
-                    "timestamp": msg.timestamp.isoformat(),
-                    "reaction": msg.reaction,
-                    "dislike_reason": msg.dislike_reason,
-                    "favoriteCount": Favorite.query.filter_by(question_id=msg.id, uid=uid).first().count if Favorite.query.filter_by(question_id=msg.id, uid=uid).first() else 0
-                }
-                for msg in session.messages
-            ]
-        }
-        for session in sessions
-    ]
+            "messages": messages_list
+        })
     return jsonify(sessions_list), 200
 
 # Route to get a specific session
@@ -575,8 +589,20 @@ def get_session(session_id):
         return jsonify({"error": "Session not found or unauthorized"}), 404
 
     messages = Message.query.filter_by(session_id=session_id).all()
-    messages_list = [
-        {
+    messages_list = []
+    for msg in messages:
+        # Dynamically fetch favoriteCount for each user question message
+        favorite_count = 0
+        if not msg.is_bot: # Only user questions can be favorited
+            favorite_entry = Favorite.query.filter_by(
+                question_content=msg.content,
+                uid=uid,
+                connection_name=session.connection_name # Assuming session connection is correct
+            ).first()
+            if favorite_entry:
+                favorite_count = favorite_entry.count
+
+        messages_list.append({
             "id": msg.id,
             "content": msg.content,
             "isBot": msg.is_bot,
@@ -585,11 +611,9 @@ def get_session(session_id):
             "timestamp": msg.timestamp.isoformat(),
             "reaction": msg.reaction,
             "dislike_reason": msg.dislike_reason,
-            "favoriteCount": Favorite.query.filter_by(question_id=msg.id, uid=uid).first().count if Favorite.query.filter_by(question_id=msg.id, uid=uid).first() else 0
-        }
-        for msg in messages
-    ]
-    db.session.commit()
+            "favoriteCount": favorite_count
+        })
+    db.session.commit() # Commit any potential lazy loading
     return jsonify({
         "id": session.id,
         "title": session.title,
@@ -652,7 +676,6 @@ def create_message():
     content = data.get('content')
     is_bot = data.get('isBot', False)
     parent_id = data.get('parentId', None)
-    is_favorited = data.get('isFavorited', False)
 
     if not uid:
         return jsonify({"error": "Invalid token, UID required"}), 401
@@ -674,11 +697,9 @@ def create_message():
         is_bot=is_bot,
         parent_id=parent_id,
         timestamp=datetime.now(timezone.utc),
-        is_favorited=is_favorited
+        is_favorited=False # Messages are not favorited on creation
     )
-    favorite = Favorite.query.filter_by(question_content=content, uid=uid).first()
-    if favorite:
-        favorite.count += 1
+    
     session.timestamp = datetime.now(timezone.utc)
     db.session.add(message)
     db.session.commit()
@@ -691,7 +712,7 @@ def create_message():
         "timestamp": message.timestamp.isoformat(),
         "reaction": message.reaction,
         "dislike_reason": message.dislike_reason,
-        "favoriteCount": 0
+        "favoriteCount": 0 # Default to 0, will be properly fetched on session load
     }), 201
 
 # Route to update a message
@@ -701,26 +722,23 @@ def update_message(message_id):
     data = request.get_json()
     uid = request.uid
     content = data.get('content')
-    print(f"Updating message {message_id} for user {uid}")
-
+    
     if not uid:
         return jsonify({"error": "Invalid token, UID required"}), 401
-    # if not content:
-    #     return jsonify({"error": "Content is required"}), 400
 
     message = Message.query.join(Session).filter(
         Message.id == message_id,
         Session.uid == uid
     ).first()
 
-    session = Session.query.filter_by(id=message.session_id, uid=uid).first()
-    if not session:
-        return jsonify({"error": "Session not found or unauthorized"}), 404
     if not message:
         return jsonify({"error": "Message not found or unauthorized"}), 404
 
+    session = Session.query.filter_by(id=message.session_id, uid=uid).first()
+    if not session:
+        return jsonify({"error": "Session not found or unauthorized"}), 404
+        
     message.content = content
-    message.is_favorited = False
     message.timestamp = datetime.now(timezone.utc)
     message.updated_at = datetime.now(timezone.utc)
     session.timestamp = datetime.now(timezone.utc)
@@ -800,38 +818,42 @@ def set_message_reaction(message_id):
 def add_favorite():
     try:
         data = request.get_json()
-        question_id = data.get('questionId')
+        question_id = data.get('questionId') # This is the Message.id of the question
         question_content = data.get('questionContent')
-        connection=data.get('currentConnection')
+        connection = data.get('currentConnection')
         uid = request.uid
+        response_query = data.get('responseQuery') # Bot's SQL query
 
-        if not question_id or not uid or not question_content:
-            return jsonify({'error': 'Question ID, question content, and user ID are required'}), 400
+        if not question_id or not uid or not question_content or not connection:
+            return jsonify({'error': 'Question ID, content, connection, and user ID are required'}), 400
 
-        # Validate question message
         question_message = Message.query.filter_by(id=question_id).first()
         if not question_message or question_message.is_bot:
-            return jsonify({'error': 'Invalid question message'}), 400
+            return jsonify({'error': 'Invalid question message for favoriting'}), 400
 
-        # Find response message using parent_id
         response_message = Message.query.filter_by(parent_id=question_id).first()
         response_id = response_message.id if response_message else None
-        response_query = data.get('responseQuery') if response_message else None
 
-        # Update favorite status
+        # Set is_favorited flag on the specific messages
         question_message.is_favorited = True
         if response_message:
             response_message.is_favorited = True
 
-        # Update favorite entry
-        favorite = Favorite.query.filter_by(question_content=question_content, uid=uid,connection_name=connection).first()
-        if favorite:
-            favorite.count += 1
-            favorite.question_content = question_content
-            favorite.response_id = response_id
-            favorite.response_query = response_query
+        # Handle the Favorite table for content popularity
+        favorite_entry = Favorite.query.filter_by(
+            question_content=question_content,
+            connection_name=connection,
+            uid=uid
+        ).first()
+
+        if favorite_entry:
+            favorite_entry.count += 1
+            # Update other fields just in case they were empty or outdated from a previous favorite
+            favorite_entry.question_id = question_id # Store the latest message ID that caused this content to be favorited
+            favorite_entry.response_id = response_id
+            favorite_entry.response_query = response_query
         else:
-            favorite = Favorite(
+            favorite_entry = Favorite(
                 question_id=question_id,
                 question_content=question_content,
                 response_id=response_id,
@@ -840,13 +862,13 @@ def add_favorite():
                 count=1,
                 uid=uid
             )
-            db.session.add(favorite)
+            db.session.add(favorite_entry)
 
         db.session.commit()
-        return jsonify({"message": "Message marked favorite successfully!", "count": favorite.count}), 201
+        return jsonify({"message": "Message marked favorite successfully!", "isFavorited": True, "count": favorite_entry.count}), 201
     except Exception as e:
         db.session.rollback()
-        print(f"Error: {str(e)}")
+        print(f"Error in add_favorite: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 # Route to get favorites
@@ -856,18 +878,21 @@ def get_favorites():
     try:
         uid = request.uid
         favorites = Favorite.query.filter_by(uid=uid).order_by(Favorite.count.desc()).all()
-        favorites_list = [
-            {
+        favorites_list = []
+        for fav in favorites:
+            # Try to get the actual question message to confirm its favorited status
+            question_msg = Message.query.filter_by(id=fav.question_id).first()
+            is_favorited_in_message = question_msg.is_favorited if question_msg else False
+
+            favorites_list.append({
                 'question_id': fav.question_id,
                 'question': fav.question_content,
                 'query': fav.response_query,
                 'count': fav.count,
-                'isFavorited': True,
+                'isFavorited': is_favorited_in_message, # Reflect actual message status
                 'connection': fav.connection_name,
-                'timestamp': fav.updated_at,
-            }
-            for fav in favorites
-        ]
+                'timestamp': fav.updated_at.isoformat(),
+            })
         return jsonify(favorites_list), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -878,37 +903,49 @@ def get_favorites():
 def delete_favorite():
     try:
         data = request.get_json()
-        question_id = data.get('questionId')
+        question_id = data.get('questionId') # This is the Message.id of the question being unfavorited
         uid = request.uid
         current_connection = data.get('currentConnection')
+        question_content = data.get('questionContent') # Need this to find the favorite entry
+
+        if not question_id or not uid or not current_connection or not question_content:
+            return jsonify({'error': 'Question ID, content, connection, and user ID are required'}), 400
+
         question_message = Message.query.filter_by(id=question_id).first()
-        response_message = Message.query.filter_by(parent_id=question_id).first() 
-        favorite = Favorite.query.filter_by(question_content=question_message.content, uid=uid,connection_name=current_connection).first()
-        if not favorite:
-            return jsonify({'error': 'Favorite not found'}), 404
+        if not question_message:
+            return jsonify({'error': 'Question message not found'}), 404
 
-        if favorite.count <= 1:
-            # Remove favorite and update message status
-            if question_message:
-                question_message.is_favorited = False
-            if response_message:
-                response_message.is_favorited = False
-            db.session.delete(favorite)
-            count = 0
-        else:
-            favorite.count -= 1
-            count = favorite.count
+        response_message = Message.query.filter_by(parent_id=question_id).first()
 
-        # Update message status
+        # Find the Favorite entry for this content
+        favorite_entry = Favorite.query.filter_by(
+            question_content=question_content,
+            uid=uid,
+            connection_name=current_connection
+        ).first()
+
+        if not favorite_entry:
+            return jsonify({'error': 'Favorite entry not found for this content and connection'}), 404
+
+        # Decrement count and handle deletion
+        favorite_entry.count -= 1
+        count_after_decrement = favorite_entry.count
+
+        if favorite_entry.count <= 0:
+            db.session.delete(favorite_entry)
+            count_after_decrement = 0 # Explicitly set to 0 as it's deleted
+
+        # Set is_favorited flag on the specific messages
         if question_message:
             question_message.is_favorited = False
         if response_message:
             response_message.is_favorited = False
+
         db.session.commit()
-        return jsonify({'message': f'Favorite {question_id} updated', 'count': count}), 200
+        return jsonify({'message': f'Favorite updated, count: {count_after_decrement}', 'count': count_after_decrement, 'isFavorited': False}), 200
     except Exception as e:
         db.session.rollback()
-        print(f"Error: {str(e)}")
+        print(f"Error in delete_favorite: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 # Route to force delete a favorite
@@ -917,31 +954,44 @@ def delete_favorite():
 def force_delete_favorite():
     try:
         data = request.get_json()
-        question_id = data.get('questionId')
+        question_id = data.get('questionId') # This is the Message.id of the question
         uid = request.uid
 
-        # Find the favorite
-        favorite = Favorite.query.filter_by(question_id=question_id, uid=uid).first()
-        if not favorite:
-            return jsonify({'error': 'Favorite not found'}), 404
+        if not question_id or not uid:
+            return jsonify({'error': 'Question ID and user ID are required'}), 400
 
-        # Unfavorite all messages with the same content
-        if favorite.question_content:
-            matching_messages = Message.query.filter_by(content=favorite.question_content).all()
-            for msg in matching_messages:
-                 response_message = Message.query.filter_by(parent_id=msg.id).first()
-                 if response_message:
-                    response_message.is_favorited = False
-                 msg.is_favorited = False
+        # Find the specific question message
+        question_message = Message.query.filter_by(id=question_id).first()
+        if not question_message:
+            return jsonify({'error': 'Question message not found'}), 404
 
-        # Delete favorite
-        db.session.delete(favorite)
+        # Find the favorite entry linked to this specific message's content
+        favorite_entry_for_content = Favorite.query.filter_by(
+            question_content=question_message.content,
+            uid=uid,
+            connection_name=question_message.session.connection_name # Assuming session relation exists for message
+        ).first()
+
+        if not favorite_entry_for_content:
+            return jsonify({'error': 'Favorite entry not found for this content'}), 404
+
+        # Decrement the count and delete if it drops to 0 or below
+        favorite_entry_for_content.count -= 1
+        if favorite_entry_for_content.count <= 0:
+            db.session.delete(favorite_entry_for_content)
+
+        # Set is_favorited flag for this specific question message and its response
+        question_message.is_favorited = False
+        response_message = Message.query.filter_by(parent_id=question_id).first()
+        if response_message:
+            response_message.is_favorited = False
+
         db.session.commit()
 
-        return jsonify({'message': f'Favorite {question_id} permanently deleted'}), 200
+        return jsonify({'message': f'Favorite for question {question_id} updated and potentially deleted'}), 200
     except Exception as e:
         db.session.rollback()
-        print(f"Error: {str(e)}")
+        print(f"Error in force_delete_favorite: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/recommended_questions', methods=['POST'])
@@ -1015,3 +1065,4 @@ def update_user_settings():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)
+

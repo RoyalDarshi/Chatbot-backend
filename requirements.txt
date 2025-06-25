@@ -1,10 +1,13 @@
 Flask
-Flask-SQLAlchemy
-Flask-CORS
+Flask-Cors
 python-dotenv
+Flask-SQLAlchemy
 itsdangerous
-sib-api-v3-sdk
+SQLAlchemy
+Werkzeug
 ldap3
-bcrypt
-google-auth
-requests
+psycopg2-binary # Use psycopg2-binary for easier installation
+mysql-connector-python
+pymongo
+# pyodbc # Uncomment if you enable MS SQL connection and install appropriate ODBC driver
+# ibm_db # Uncomment if you enable DB2 connection

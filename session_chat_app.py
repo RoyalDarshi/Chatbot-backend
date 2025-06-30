@@ -23,7 +23,7 @@ import mysql.connector
 import pymongo
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Define the database connection functions (copied from mod_testbd.py)
 def connect_postgresql(connection_params):
@@ -161,10 +161,6 @@ db_functions = {
     'mongodb': connect_mongodb
 }
 
-
-# Initialize Flask app
-app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Load environment variables from .env file
 load_dotenv()
@@ -1223,6 +1219,10 @@ def test_db_connection():
         'password': data.get('password'),
         'database': data.get('database')
     }
+
+    @app.route('/test', methods=['GET'])
+    def get_test_db_connection():\
+        return jsonify({'message': 'Test connection route'}), 200
     
     # Check if all required connection parameters are provided
     if not all(connection_params.values()):

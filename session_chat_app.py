@@ -1219,10 +1219,6 @@ def test_db_connection():
         'password': data.get('password'),
         'database': data.get('database')
     }
-
-    @app.route('/test', methods=['GET'])
-    def get_test_db_connection():\
-        return jsonify({'message': 'Test connection route'}), 200
     
     # Check if all required connection parameters are provided
     if not all(connection_params.values()):

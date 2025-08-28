@@ -18,7 +18,7 @@ import uuid
 # Import database connection functions (copied from mod_testbd.py)
 import psycopg2
 import mysql.connector
-# import ibm_db # Uncomment if needed and ensure ibm_db is installed
+import ibm_db
 # import pyodbc # Uncomment if needed and ensure pyodbc is installed
 import pymongo
 
@@ -64,27 +64,27 @@ def connect_mysql(connection_params):
             except Exception:
                 pass
 
-# def connect_db2(connection_params):
-#     conn = None
-#     try:
-#         conn_str = (
-#             f"DATABASE={connection_params['database']};"
-#             f"HOSTNAME={connection_params['hostname']};"
-#             f"PORT={connection_params['port']};"
-#             f"PROTOCOL=TCPIP;"
-#             f"UID={connection_params['username']};"
-#             f"PWD={connection_params['password']};"
-#         )
-#         conn = ibm_db.connect(conn_str, "", "")
-#         return "DB2 connection successful!", 200
-#     except Exception as e:
-#         return f"DB2 connection failed: {str(e)}", 400
-#     finally:
-#         if conn is not None:
-#             try:
-#                 ibm_db.close(conn)
-#             except Exception:
-#                 pass
+def connect_db2(connection_params):
+    conn = None
+    try:
+        conn_str = (
+            f"DATABASE={connection_params['database']};"
+            f"HOSTNAME={connection_params['hostname']};"
+            f"PORT={connection_params['port']};"
+            f"PROTOCOL=TCPIP;"
+            f"UID={connection_params['username']};"
+            f"PWD={connection_params['password']};"
+        )
+        conn = ibm_db.connect(conn_str, "", "")
+        return "DB2 connection successful!", 200
+    except Exception as e:
+        return f"DB2 connection failed: {str(e)}", 400
+    finally:
+        if conn is not None:
+            try:
+                ibm_db.close(conn)
+            except Exception:
+                pass
 
 # def connect_oracle(connection_params):
 #     conn = None
@@ -155,7 +155,7 @@ def connect_mongodb(connection_params):
 db_functions = {
     'postgresql': connect_postgresql,
     'mysql': connect_mysql,
-    # 'db2': connect_db2,
+    'db2': connect_db2,
     # 'oracle': connect_oracle,
     'mssql': connect_mssql,
     'mongodb': connect_mongodb

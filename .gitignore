@@ -2,8 +2,8 @@
 lib/
 
 # Ignore environment files (but keep an example)
-.env
 !.env.example
+.env
 
 # Ignore database files
 *.db

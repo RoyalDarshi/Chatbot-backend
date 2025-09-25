@@ -19,6 +19,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 # Import database connection functions
 import psycopg2
 import mysql.connector
+import pyodbc  # Added for MSSQL
 # import pyodbc  # Added for MSSQL
 import pymongo
 

@@ -3,29 +3,88 @@ from flask_cors import CORS
 from dotenv import load_dotenv, dotenv_values, set_key
 from flask_sqlalchemy import SQLAlchemy
 from itsdangerous import URLSafeTimedSerializer, BadSignature
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from sqlalchemy import or_
 from werkzeug.security import check_password_hash, generate_password_hash
 from ldap3 import Server, Connection, ALL, SUBTREE, AUTO_BIND_TLS_BEFORE_BIND, Tls
 from ldap3.utils.conv import escape_filter_chars
 from ldap3.utils.dn import escape_rdn
-from datetime import datetime, timezone
 import ssl
 import json
 import os
 import uuid
+import atexit
+from apscheduler.schedulers.background import BackgroundScheduler
 
-# Import database connection functions (copied from mod_testbd.py)
+# Import database connection functions
 import psycopg2
 import mysql.connector
-import ibm_db
-# import pyodbc # Uncomment if needed and ensure pyodbc is installed
+import pyodbc  # Added for MSSQL
 import pymongo
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
+load_dotenv()
 
-# Define the database connection functions (copied from mod_testbd.py)
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URI', 'sqlite:///users.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key')
+app.config['SECURITY_PASSWORD_SALT'] = os.getenv('SECURITY_PASSWORD_SALT', 'your-salt')
+
+LDAP_SERVER = "ldap://150.239.171.184"
+LDAP_BASE_DN = "dc=150,dc=239,dc=171,dc=184"
+LDAP_USER_DN_TEMPLATE = "uid={},ou=people," + LDAP_BASE_DN
+LDAP_PORT = 389
+LDAP_SEARCH_FILTER = "(uid=%s)"
+
+db = SQLAlchemy(app)
+
+# Initialize the scheduler for checking stalled messages
+scheduler = BackgroundScheduler()
+
+def check_stalled_messages():
+    with app.app_context():
+        try:
+            two_minutes_ago = datetime.now(timezone.utc) - timedelta(minutes=2)
+            stalled_messages = Message.query.filter(
+                Message.status == 'loading',
+                Message.created_at <= two_minutes_ago
+            ).all()
+            for message in stalled_messages:
+                message.content = "Sorry, an error occurred. Please try again."
+                message.status = 'normal'
+                message.updated_at = datetime.now(timezone.utc)
+                session = Session.query.filter_by(id=message.session_id).first()
+                if session:
+                    session.timestamp = datetime.now(timezone.utc)
+            db.session.commit()
+        except Exception as e:
+            print(f"Error in check_stalled_messages: {str(e)}")
+            db.session.rollback()
+
+scheduler.add_job(check_stalled_messages, 'interval', minutes=1)
+scheduler.start()
+
+# Shutdown hook to clean up loading messages
+def cleanup_loading_messages():
+    with app.app_context():
+        try:
+            stalled_messages = Message.query.filter_by(status='loading').all()
+            for message in stalled_messages:
+                message.content = "Sorry, an error occurred. Please try again."
+                message.status = 'normal'
+                message.updated_at = datetime.now(timezone.utc)
+                session = Session.query.filter_by(id=message.session_id).first()
+                if session:
+                    session.timestamp = datetime.now(timezone.utc)
+            db.session.commit()
+        except Exception as e:
+            print(f"Error in cleanup_loading_messages: {str(e)}")
+            db.session.rollback()
+
+atexit.register(cleanup_loading_messages)
+
+# Define the database connection functions
 def connect_postgresql(connection_params):
     conn = None
     try:
@@ -64,49 +123,9 @@ def connect_mysql(connection_params):
             except Exception:
                 pass
 
-def connect_db2(connection_params):
-    conn = None
-    try:
-        conn_str = (
-            f"DATABASE={connection_params['database']};"
-            f"HOSTNAME={connection_params['hostname']};"
-            f"PORT={connection_params['port']};"
-            f"PROTOCOL=TCPIP;"
-            f"UID={connection_params['username']};"
-            f"PWD={connection_params['password']};"
-        )
-        conn = ibm_db.connect(conn_str, "", "")
-        return "DB2 connection successful!", 200
-    except Exception as e:
-        return f"DB2 connection failed: {str(e)}", 400
-    finally:
-        if conn is not None:
-            try:
-                ibm_db.close(conn)
-            except Exception:
-                pass
-
-# def connect_oracle(connection_params):
-#     conn = None
-#     try:
-#         dsn = cx_Oracle.makedsn(connection_params['hostname'], connection_params['port'], service_name=connection_params['database'])
-#         conn = cx_Oracle.connect(user=connection_params['username'], password=connection_params['password'], dsn=dsn)
-#         return "Oracle connection successful!", 200
-#     except cx_Oracle.Error as e:
-#         return f"Oracle connection failed: {str(e)}", 400
-#     except Exception as e:
-#         return f"Oracle unexpected error: {str(e)}", 500
-#     finally:
-#         if conn is not None:
-#             try:
-#                 conn.close()
-#             except Exception:
-#                 pass
-
 def connect_mssql(connection_params):
     conn = None
     try:
-        # Note: connection_params should include 'driver', 'server', etc., or adjust as needed
         conn = pyodbc.connect(**connection_params)
         return "MS SQL connection successful!", 200
     except pyodbc.Error as e:
@@ -120,21 +139,17 @@ def connect_mssql(connection_params):
             except Exception:
                 pass
 
-
 def connect_mongodb(connection_params):
     client = None
     try:
-        username = connection_params.get('username', 'root')  # default to root
+        username = connection_params.get('username', 'root')
         password = connection_params['password']
         hostname = connection_params['hostname']
         port = connection_params.get('port', 27017)
         database = connection_params.get('database', 'admin')
-
-        # Build the URI manually
         uri = f"mongodb://{username}:{password}@{hostname}:{port}/{database}"
-
         client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=5000)
-        client.server_info()  # Forces connection
+        client.server_info()
         return "MongoDB connection successful!", 200
     except KeyError as e:
         return f"Missing required connection parameter: {str(e)}", 400
@@ -150,44 +165,27 @@ def connect_mongodb(connection_params):
         if client is not None:
             client.close()
 
-
-# Map of database types to functions (copied from mod_testbd.py)
 db_functions = {
     'postgresql': connect_postgresql,
     'mysql': connect_mysql,
-    'db2': connect_db2,
-    # 'oracle': connect_oracle,
     'mssql': connect_mssql,
     'mongodb': connect_mongodb
 }
 
+# Define the User model
+class User(db.Model):
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    username = db.Column(db.String(120), unique=True, nullable=False)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password = db.Column(db.String(255), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 
-# Load environment variables from .env file
-load_dotenv()
-
-# Basic app configuration
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URI', 'sqlite:///users.db')
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key')
-app.config['SECURITY_PASSWORD_SALT'] = os.getenv('SECURITY_PASSWORD_SALT', 'your-salt')
-
-# LDAP Configuration
-LDAP_SERVER = "ldap://150.239.171.184"
-LDAP_BASE_DN = "dc=150,dc=239,dc=171,dc=184"
-LDAP_USER_DN_TEMPLATE = "uid={},ou=people," + LDAP_BASE_DN
-LDAP_PORT = 389
-LDAP_SEARCH_FILTER = "(uid=%s)"
-
-# Initialize SQLAlchemy
-db = SQLAlchemy(app)
-
-# Define the Admin model
 class Admin(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password = db.Column(db.String(255), nullable=False)
 
-# Define the Session model
 class Session(db.Model):
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     uid = db.Column(db.String(255), nullable=False)
@@ -197,40 +195,35 @@ class Session(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 
-# Define the Message model
 class Message(db.Model):
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     session_id = db.Column(db.String(36), db.ForeignKey('session.id'), nullable=False)
     content = db.Column(db.Text, nullable=False)
     is_bot = db.Column(db.Boolean, default=False, nullable=False)
-    is_favorited = db.Column(db.Boolean, default=False, nullable=False) # Keep this flag for individual message status
+    is_favorited = db.Column(db.Boolean, default=False, nullable=False)
     parent_id = db.Column(db.String(36), db.ForeignKey('message.id'), nullable=True)
-    reaction = db.Column(db.String(10), nullable=True)  # 'like', 'dislike', or null
+    reaction = db.Column(db.String(10), nullable=True)
     dislike_reason = db.Column(db.Text, nullable=True)
     timestamp = db.Column(db.DateTime, nullable=False, default=datetime.now(timezone.utc))
     created_at = db.Column(db.DateTime, default=datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
+    status = db.Column(db.String(20), default='normal', nullable=False, index=True)  # Added status field
     session = db.relationship('Session', backref=db.backref('messages', lazy=True))
     parent = db.relationship('Message', remote_side=[id], backref='responses')
 
-# Define the Favorite model
 class Favorite(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    question_id = db.Column(db.String(255), nullable=False) # This is the Message.id of the question message
+    question_id = db.Column(db.String(255), nullable=False)
     question_content = db.Column(db.String(500), nullable=False)
     response_id = db.Column(db.String(255), nullable=True)
     response_query = db.Column(db.String(500), nullable=True)
     connection_name = db.Column(db.String(255), nullable=False)
     uid = db.Column(db.String(255), nullable=False)
-    count = db.Column(db.Integer, default=0) # Represents popularity of this question content for this user
+    count = db.Column(db.Integer, default=0)
     created_at = db.Column(db.DateTime, default=datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
-    
-    # Add unique constraint to ensure one favorite entry per user per question content per connection
     __table_args__ = (db.UniqueConstraint('question_content', 'connection_name', 'uid', name='_user_content_connection_uc'),)
 
-
-# Define the ConnectionDetails model
 class ConnectionDetails(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     admin_id = db.Column(db.Integer, db.ForeignKey('admin.id'), nullable=True)
@@ -248,7 +241,6 @@ class ConnectionDetails(db.Model):
     isAdmin = db.Column(db.Boolean, default=False, nullable=False)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.now(timezone.utc))
 
-# Define the UserSettings model
 class UserSettings(db.Model):
     uid = db.Column(db.String(255), primary_key=True)
     theme = db.Column(db.String(10), default='light')
@@ -256,35 +248,73 @@ class UserSettings(db.Model):
     notifications_enabled = db.Column(db.Boolean, default=True)
     auto_save_chats = db.Column(db.Boolean, default=True)
 
-# Drop and recreate tables (for development only, comment out in production)
 with app.app_context():
-    # db.drop_all()
     db.create_all()
 
-# Create a serializer for token handling
+# Route to populate users (for development/testing only)
+@app.route('/populate-users', methods=['POST'])
+# @admin_required
+def populate_users():
+    try:
+        # Check if users already exist to avoid duplicates
+        if User.query.count() > 0:
+            return jsonify({'message': 'Users already populated'}), 400
+
+        users = [
+            {
+                'username': 'user1',
+                'email': 'user1@example.com',
+                'password': generate_password_hash('user1')
+            },
+            {
+                'username': 'user2',
+                'email': 'user2@example.com',
+                'password': generate_password_hash('user2')
+            },
+            {
+                'username': 'user3',
+                'email': 'user3@example.com',
+                'password': generate_password_hash('user3')
+            },
+            {
+                'username': 'user4',
+                'email': 'user4@example.com',
+                'password': generate_password_hash('user4')
+            }
+        ]
+
+        for user_data in users:
+            user = User(
+                username=user_data['username'],
+                email=user_data['email'],
+                password=user_data['password']
+            )
+            db.session.add(user)
+
+        db.session.commit()
+        return jsonify({'message': '4 users created successfully'}), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
 serializer = URLSafeTimedSerializer(app.config['SECRET_KEY'])
 
 def authenticate_user(username, password):
     error_message = "Unknown error occurred"
     try:
         print(f"Attempting LDAP authentication for user: {username}")
-
         safe_username = escape_rdn(username)
         safe_filter = escape_filter_chars(username)
         user_dn = LDAP_USER_DN_TEMPLATE.format(safe_username)
-
         server = Server(LDAP_SERVER, use_ssl=True, get_info=ALL)
         conn = Connection(server, user=user_dn, password=password, 
-                         auto_bind=AUTO_BIND_TLS_BEFORE_BIND, receive_timeout=10)
-
+                        auto_bind=AUTO_BIND_TLS_BEFORE_BIND, receive_timeout=10)
         if not conn.bound:
             return False, "LDAP bind failed. Invalid credentials or server issue."
-
         conn.search(LDAP_BASE_DN, 
                    f"(uid={safe_filter})", 
                    search_scope=SUBTREE, 
                    attributes=['cn', 'uid'])
-
         if conn.entries:
             user_entry = conn.entries[0]
             print(f"Authentication successful for: {user_entry}")
@@ -293,7 +323,6 @@ def authenticate_user(username, password):
                 "cn": user_entry.cn.value
             }
         return False, "User not found in LDAP directory."
-
     except Exception as e:
         error_message = f"LDAP Error: {str(e)}"
         print(f"Authentication Failed: {error_message}")
@@ -304,7 +333,6 @@ def user_exists_ldap(username):
     LDAP_BASE_DN = "dc=example,dc=com"
     SERVICE_ACCOUNT_DN = "cn=admin,dc=example,dc=com"
     SERVICE_PASSWORD = "your_admin_password"
-    
     conn = None
     try:
         server = Server(
@@ -316,7 +344,6 @@ def user_exists_ldap(username):
             ),
             get_info=ALL
         )
-
         conn = Connection(
             server,
             user=SERVICE_ACCOUNT_DN,
@@ -324,7 +351,6 @@ def user_exists_ldap(username):
             auto_bind=True,
             authentication="SIMPLE"
         )
-
         search_params = {
             'search_base': LDAP_BASE_DN,
             'search_filter': f"(uid={escape_filter_chars(username)})",
@@ -333,13 +359,10 @@ def user_exists_ldap(username):
             'size_limit': 2,
             'get_operational_attributes': True
         }
-
         if not conn.search(**search_params):
             print(f"Search failed: {conn.result}")
             return False
-
         return len(conn.entries) > 0
-
     except Exception as e:
         print(f"\n[Critical Error] {str(e)}")
         return False
@@ -347,7 +370,6 @@ def user_exists_ldap(username):
         if conn and not conn.closed:
             conn.unbind()
 
-# Token verification decorator
 def token_required(f):
     def decorated(*args, **kwargs):
         token = None
@@ -355,7 +377,6 @@ def token_required(f):
             token = request.headers['Authorization'].split(" ")[1]
         elif request.json and 'token' in request.json:
             token = request.json.get('token')
-
         if not token:
             return jsonify({'message': 'Token is required'}), 401
         try:
@@ -364,14 +385,12 @@ def token_required(f):
             request.uid = data.get('uid')
         except BadSignature:
             return jsonify({'message': 'Invalid token'}), 401
-        # Skip Content-Type check for GET and DELETE, or POST without body
         if request.method in ['POST', 'PUT', 'PATCH'] and request.get_data() and request.content_type != 'application/json':
             return jsonify({"error": "Unsupported Media Type, Content-Type must be application/json"}), 415
         return f(*args, **kwargs)
     decorated.__name__ = f.__name__
     return decorated
 
-# Admin verification decorator
 def admin_required(f):
     @token_required
     def decorated(*args, **kwargs):
@@ -382,25 +401,19 @@ def admin_required(f):
     decorated.__name__ = f.__name__
     return decorated
 
-# User login route
 @app.route('/login/user', methods=['POST'])
 def login_user():
     data = request.get_json()
     username = data.get("email")
     password = data.get("password")
-    
     if not username or not password:
         return jsonify({"error": "Username and password are required"}), 400
-
-    # success, result = authenticate_user(username, password)
-    success = True
-    if success:
-        token = serializer.dumps({'uid': "user1"}, salt=app.config['SECURITY_PASSWORD_SALT'])
+    user = User.query.filter_by(username=username).first()
+    if user and check_password_hash(user.password, password):
+        token = serializer.dumps({'uid': user.id}, salt=app.config['SECURITY_PASSWORD_SALT'])
         return jsonify({"message": "Login successful", "token": token}), 200
-    else:
-        return jsonify({"error": "result"}), 401
+    return jsonify({"error": "Invalid credentials"}), 401
 
-# Admin login route
 @app.route('/login/admin', methods=['POST'])
 def login_admin():
     data = request.get_json()
@@ -414,7 +427,6 @@ def login_admin():
         return jsonify({'token': token, 'isAdmin': True}), 200
     return jsonify({'message': 'Invalid credentials'}), 401
 
-# Token validation route
 @app.route('/validate-token', methods=['POST'])
 def validate_token():
     data = request.get_json()
@@ -435,6 +447,9 @@ def validate_token():
             }), 200
         elif decoded_data.get('uid'):
             uid = decoded_data.get('uid')
+            user = User.query.filter_by(id=uid).first()
+            if not user:
+                return jsonify({'message': 'User not found', 'valid': False}), 401
             return jsonify({
                 'message': 'Token is valid',
                 'valid': True,
@@ -446,17 +461,14 @@ def validate_token():
     except BadSignature:
         return jsonify({'message': 'Invalid or expired token', 'valid': False}), 401
 
-# Route to create a connection for regular users
 @app.route('/connections/user/create', methods=['POST'])
 @token_required
 def create_user_connection():
     data = request.get_json()
     connection_details = data.get('connectionDetails', {})
     uid = request.uid
-
     password = connection_details.get('password', '')
     hashed_password = serializer.dumps({'password': password}, salt=app.config['SECURITY_PASSWORD_SALT'])
-
     new_connection = ConnectionDetails(
         uid=uid,
         connectionName=connection_details.get('connectionName', ''),
@@ -474,17 +486,14 @@ def create_user_connection():
     db.session.commit()
     return jsonify({'message': 'Connection created'}), 200
 
-# Route to create a connection for admins
 @app.route('/connections/admin/create', methods=['POST'])
 @admin_required
 def create_admin_connection():
     data = request.get_json()
     connection_details = data.get('connectionDetails', {})
     admin = Admin.query.filter_by(email=request.user_email).first()
-
     password = connection_details.get('password', '')
     hashed_password = serializer.dumps({'password': password}, salt=app.config['SECURITY_PASSWORD_SALT'])
-
     new_connection = ConnectionDetails(
         admin_id=admin.id,
         uid='',
@@ -499,22 +508,17 @@ def create_admin_connection():
         isAdmin=True,
         created_at=datetime.now(timezone.utc)
     )
-
     db.session.add(new_connection)
     db.session.commit()
     return jsonify({'message': 'Admin connection created'}), 200
 
-# Route to get connections for regular users
 @app.route('/connections/user/list', methods=['POST'])
 @token_required
 def get_user_connections():
     uid = request.uid
-
     user_connections = ConnectionDetails.query.filter(ConnectionDetails.uid == uid).all()
     admin_connections = ConnectionDetails.query.filter(ConnectionDetails.isAdmin == True).all()
-
     all_connections = user_connections + admin_connections
-
     connections_list = [
         {
             'id': conn.id,
@@ -534,10 +538,8 @@ def get_user_connections():
         }
         for conn in all_connections
     ]
-
     return jsonify({'connections': connections_list}), 200
 
-# Route to get all connections for admins
 @app.route('/connections/admin/list', methods=['POST'])
 @admin_required
 def get_admin_connections():
@@ -562,7 +564,6 @@ def get_admin_connections():
     ]
     return jsonify({'connections': connections_list}), 200
 
-# Route to delete a connection
 @app.route('/connections/delete', methods=['POST'])
 @token_required
 def delete_connection():
@@ -570,8 +571,6 @@ def delete_connection():
     connection_id = data.get('connectionId')
     uid = request.uid
     email = request.user_email
-
-    # Determine if the request is from a user or an admin and fetch the connection
     if uid:
         connection = ConnectionDetails.query.filter_by(
             id=connection_id,
@@ -587,43 +586,30 @@ def delete_connection():
         ).first()
     else:
         return jsonify({'message': 'Invalid token'}), 401
-
-    # Check if the connection exists and the user is authorized
     if not connection:
         return jsonify({'message': 'Connection not found or unauthorized'}), 404
-
-    # Delete the connection
     db.session.delete(connection)
-
-    # Update all sessions and favorites that use this connection_name
     Session.query.filter_by(connection_name=connection.connectionName).update({Session.connection_name: ''})
     Favorite.query.filter_by(connection_name=connection.connectionName).update({Favorite.connection_name: ''})
-
-    # Commit all changes to the database
     db.session.commit()
     return jsonify({'message': 'Connection deleted'}), 200
 
-# Route to set LDAP configuration
 @app.route('/ldap-config', methods=['POST'])
 @admin_required
 def set_ldap_config():
     data = request.get_json().get('ldapConfig', {})
-    
     required_fields = ['ldapHost', 'baseDn', 'userRdn', 'ldapPort']
     for field in required_fields:
         if field not in data:
             return jsonify({"error": f"Missing required field: {field}"}), 400
-    
     try:
         int(data['ldapPort'])
     except ValueError:
         return jsonify({"error": "LDAP_PORT must be an integer"}), 400
-    
     set_key('.env', 'LDAP_SERVER', data['ldapHost'])
     set_key('.env', 'LDAP_BASE_DN', data['baseDn'])
     set_key('.env', 'LDAP_USER_RDN', data['userRdn'])
     set_key('.env', 'LDAP_PORT', str(data['ldapPort']))
-    
     return jsonify({
         "LDAP_SERVER": data['ldapHost'],
         "LDAP_BASE_DN": data['baseDn'],
@@ -631,7 +617,6 @@ def set_ldap_config():
         "LDAP_PORT": data['ldapPort']
     }), 200
 
-# Route to get LDAP configuration
 @app.route('/get-ldap-config', methods=['POST'])
 @admin_required
 def get_ldap_config():
@@ -644,7 +629,6 @@ def get_ldap_config():
     }
     return jsonify(config)
 
-# Route to create a session
 @app.route('/api/sessions', methods=['POST'])
 @token_required
 def create_session():
@@ -652,11 +636,9 @@ def create_session():
     uid = request.uid
     if not uid:
         return jsonify({"error": "Invalid token, UID required"}), 401
-
     title = data.get('title')
     if not title:
         return jsonify({"error": "Title is required"}), 400
-    
     connection=data.get('currentConnection')
     if not connection:
         return jsonify({"error": "Connection is required"}), 400
@@ -675,30 +657,26 @@ def create_session():
         "messages": []
     }), 201
 
-# Route to get all sessions for a user
 @app.route('/api/fetchsessions', methods=['POST'])
 @token_required
 def get_sessions():
     uid = request.uid
     if not uid:
         return jsonify({"error": "Invalid token, UID required"}), 401
-
     sessions = Session.query.filter_by(uid=uid).order_by(Session.timestamp.desc()).all()
     sessions_list = []
     for session in sessions:
         messages_list = []
         for msg in session.messages:
-            # Dynamically fetch favoriteCount for each user question message
             favorite_count = 0
-            if not msg.is_bot: # Only user questions can be favorited
+            if not msg.is_bot:
                 favorite_entry = Favorite.query.filter_by(
                     question_content=msg.content,
                     uid=uid,
-                    connection_name=session.connection_name # Assuming session connection is correct
+                    connection_name=session.connection_name
                 ).first()
                 if favorite_entry:
                     favorite_count = favorite_entry.count
-
             messages_list.append({
                 "id": msg.id,
                 "content": msg.content,
@@ -708,7 +686,8 @@ def get_sessions():
                 "timestamp": msg.timestamp.isoformat(),
                 "reaction": msg.reaction,
                 "dislike_reason": msg.dislike_reason,
-                "favoriteCount": favorite_count
+                "favoriteCount": favorite_count,
+                "status": msg.status  # Added status
             })
         sessions_list.append({
             "id": session.id,
@@ -719,32 +698,27 @@ def get_sessions():
         })
     return jsonify(sessions_list), 200
 
-# Route to get a specific session
 @app.route('/api/sessions/<session_id>', methods=['GET'])
 @token_required
 def get_session(session_id):
     uid = request.uid
     if not uid:
         return jsonify({"error": "Invalid token, UID required"}), 401
-
     session = Session.query.filter_by(id=session_id, uid=uid).first()
     if not session:
         return jsonify({"error": "Session not found or unauthorized"}), 404
-
     messages = Message.query.filter_by(session_id=session_id).all()
     messages_list = []
     for msg in messages:
-        # Dynamically fetch favoriteCount for each user question message
         favorite_count = 0
-        if not msg.is_bot: # Only user questions can be favorited
+        if not msg.is_bot:
             favorite_entry = Favorite.query.filter_by(
                 question_content=msg.content,
                 uid=uid,
-                connection_name=session.connection_name # Assuming session connection is correct
+                connection_name=session.connection_name
             ).first()
             if favorite_entry:
                 favorite_count = favorite_entry.count
-
         messages_list.append({
             "id": msg.id,
             "content": msg.content,
@@ -754,9 +728,10 @@ def get_session(session_id):
             "timestamp": msg.timestamp.isoformat(),
             "reaction": msg.reaction,
             "dislike_reason": msg.dislike_reason,
-            "favoriteCount": favorite_count
+            "favoriteCount": favorite_count,
+            "status": msg.status  # Added status
         })
-    db.session.commit() # Commit any potential lazy loading
+    db.session.commit()
     return jsonify({
         "id": session.id,
         "title": session.title,
@@ -765,7 +740,6 @@ def get_session(session_id):
         "messages": messages_list
     }), 200
 
-# Route to update a session
 @app.route('/api/sessions/<session_id>', methods=['PUT'])
 @token_required
 def update_session(session_id):
@@ -776,11 +750,9 @@ def update_session(session_id):
         return jsonify({"error": "Invalid token, UID required"}), 401
     if not title:
         return jsonify({"error": "Title is required"}), 400
-
     session = Session.query.filter_by(id=session_id, uid=uid).first()
     if not session:
         return jsonify({"error": "Session not found or unauthorized"}), 404
-
     session.title = title
     session.updated_at = datetime.now(timezone.utc)
     db.session.commit()
@@ -791,25 +763,20 @@ def update_session(session_id):
         "messages": []
     }), 200
 
-# Route to delete a session
 @app.route('/api/sessions/<session_id>', methods=['DELETE'])
 @token_required
-def delete_session(session_id):  # Added session_id parameter
+def delete_session(session_id):
     uid = request.uid
     if not uid:
         return jsonify({"error": "Invalid token, UID required"}), 401
-
     session = Session.query.filter_by(id=session_id, uid=uid).first()
     if not session:
         return jsonify({"error": "Session not found or unauthorized"}), 404
-
-    # Delete all messages associated with the session
     Message.query.filter_by(session_id=session_id).delete()
     db.session.delete(session)
     db.session.commit()
     return jsonify({"message": "Session deleted"}), 200
 
-# Route to create a message
 @app.route('/api/messages', methods=['POST'])
 @token_required
 def create_message():
@@ -819,30 +786,27 @@ def create_message():
     content = data.get('content')
     is_bot = data.get('isBot', False)
     parent_id = data.get('parentId', None)
-
     if not uid:
         return jsonify({"error": "Invalid token, UID required"}), 401
     if not session_id:
         return jsonify({"error": "Session ID are required"}), 400
-
     session = Session.query.filter_by(id=session_id, uid=uid).first()
     if not session:
         return jsonify({"error": "Session not found or unauthorized"}), 404
-
     if is_bot and parent_id:
         parent_message = Message.query.filter_by(id=parent_id, session_id=session_id).first()
         if not parent_message or parent_message.is_bot:
             return jsonify({"error": "Invalid parent message"}), 400
-
+    status = 'loading' if content == 'loading...' else 'normal'
     message = Message(
         session_id=session_id,
         content=content,
         is_bot=is_bot,
         parent_id=parent_id,
         timestamp=datetime.now(timezone.utc),
-        is_favorited=False # Messages are not favorited on creation
+        is_favorited=False,
+        status=status  # Added status
     )
-    
     session.timestamp = datetime.now(timezone.utc)
     db.session.add(message)
     db.session.commit()
@@ -855,32 +819,27 @@ def create_message():
         "timestamp": message.timestamp.isoformat(),
         "reaction": message.reaction,
         "dislike_reason": message.dislike_reason,
-        "favoriteCount": 0 # Default to 0, will be properly fetched on session load
+        "favoriteCount": 0,
+        "status": message.status  # Added status
     }), 201
 
-# Route to update a message
 @app.route('/api/messages/<message_id>', methods=['PUT'])
 @token_required
 def update_message(message_id):
     data = request.get_json()
     uid = request.uid
     content = data.get('content')
-    
     if not uid:
         return jsonify({"error": "Invalid token, UID required"}), 401
-
     message = Message.query.join(Session).filter(
         Message.id == message_id,
         Session.uid == uid
     ).first()
-
     if not message:
         return jsonify({"error": "Message not found or unauthorized"}), 404
-
     session = Session.query.filter_by(id=message.session_id, uid=uid).first()
     if not session:
         return jsonify({"error": "Session not found or unauthorized"}), 404
-        
     message.content = content
     message.timestamp = datetime.now(timezone.utc)
     message.updated_at = datetime.now(timezone.utc)
@@ -888,22 +847,18 @@ def update_message(message_id):
     db.session.commit()
     return jsonify({"message": "Message updated"}), 200
 
-# Route to get a message
 @app.route('/api/getmessages/<message_id>', methods=['POST'])
 @token_required
 def get_message(message_id):
     uid = request.uid
     if not uid:
         return jsonify({"error": "Invalid token, UID required"}), 401
-
     message = Message.query.filter_by(id=message_id).first()
     if not message:
         return jsonify({"error": "Message not found"}), 404
-
     session = Session.query.filter_by(id=message.session_id, uid=uid).first()
     if not session:
         return jsonify({"error": "Unauthorized access to message"}), 403
-
     response = {
         "id": message.id,
         "content": message.content,
@@ -912,87 +867,68 @@ def get_message(message_id):
         "parentId": message.parent_id,
         "timestamp": message.timestamp.isoformat(),
         "reaction": message.reaction,
-        "dislike_reason": message.dislike_reason
+        "dislike_reason": message.dislike_reason,
+        "status": message.status  # Added status
     }
     return jsonify(response), 200
 
-# Route to set message reaction
 @app.route('/api/messages/<message_id>/reaction', methods=['POST'])
 @token_required
 def set_message_reaction(message_id):
-    print(message_id)
     data = request.get_json()
     reaction = data.get('reaction')
     dislike_reason = data.get('dislike_reason')
     uid = request.uid
-
     if not uid:
         return jsonify({"error": "Invalid token, UID required"}), 401
-
     message = Message.query.filter_by(id=message_id).first()
     if not message:
         return jsonify({"error": "Message not found"}), 404
-
     session = Session.query.filter_by(id=message.session_id, uid=uid).first()
     if not session:
         return jsonify({"error": "Unauthorized access to message"}), 403
-
     if not message.is_bot:
         return jsonify({"error": "Can only set reaction for bot messages"}), 400
-
     if reaction not in ['like', 'dislike', None]:
         return jsonify({"error": "Invalid reaction value"}), 400
-
     if reaction == 'dislike' and not dislike_reason:
         return jsonify({"error": "Dislike reason is required when disliking"}), 400
-
     message.reaction = reaction
     if reaction == 'dislike':
         message.dislike_reason = dislike_reason
     else:
         message.dislike_reason = None
-
     db.session.commit()
     return jsonify({"message": "Reaction set successfully"}), 200
 
-# Route to favorite a message
 @app.route('/favorite', methods=['POST'])
 @token_required
 def add_favorite():
     try:
         data = request.get_json()
-        question_id = data.get('questionId') # This is the Message.id of the question
+        question_id = data.get('questionId')
         question_content = data.get('questionContent')
         connection = data.get('currentConnection')
         uid = request.uid
-        response_query = data.get('responseQuery') # Bot's SQL query
-
+        response_query = data.get('responseQuery')
         if not question_id or not uid or not question_content or not connection:
             return jsonify({'error': 'Question ID, content, connection, and user ID are required'}), 400
-
         question_message = Message.query.filter_by(id=question_id).first()
         if not question_message or question_message.is_bot:
             return jsonify({'error': 'Invalid question message for favoriting'}), 400
-
         response_message = Message.query.filter_by(parent_id=question_id).first()
         response_id = response_message.id if response_message else None
-
-        # Set is_favorited flag on the specific messages
         question_message.is_favorited = True
         if response_message:
             response_message.is_favorited = True
-
-        # Handle the Favorite table for content popularity
         favorite_entry = Favorite.query.filter_by(
             question_content=question_content,
             connection_name=connection,
             uid=uid
         ).first()
-
         if favorite_entry:
             favorite_entry.count += 1
-            # Update other fields just in case they were empty or outdated from a previous favorite
-            favorite_entry.question_id = question_id # Store the latest message ID that caused this content to be favorited
+            favorite_entry.question_id = question_id
             favorite_entry.response_id = response_id
             favorite_entry.response_query = response_query
         else:
@@ -1006,7 +942,6 @@ def add_favorite():
                 uid=uid
             )
             db.session.add(favorite_entry)
-
         db.session.commit()
         return jsonify({"message": "Message marked favorite successfully!", "isFavorited": True, "count": favorite_entry.count}), 201
     except Exception as e:
@@ -1014,7 +949,6 @@ def add_favorite():
         print(f"Error in add_favorite: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-# Route to get favorites
 @app.route('/favorites', methods=['POST'])
 @token_required
 def get_favorites():
@@ -1023,16 +957,14 @@ def get_favorites():
         favorites = Favorite.query.filter_by(uid=uid).order_by(Favorite.count.desc()).all()
         favorites_list = []
         for fav in favorites:
-            # Try to get the actual question message to confirm its favorited status
             question_msg = Message.query.filter_by(id=fav.question_id).first()
             is_favorited_in_message = question_msg.is_favorited if question_msg else False
-
             favorites_list.append({
                 'question_id': fav.question_id,
                 'question': fav.question_content,
                 'query': fav.response_query,
                 'count': fav.count,
-                'isFavorited': is_favorited_in_message, # Reflect actual message status
+                'isFavorited': is_favorited_in_message,
                 'connection': fav.connection_name,
                 'timestamp': fav.updated_at.isoformat(),
             })
@@ -1040,50 +972,37 @@ def get_favorites():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# Route to unfavorite a message
 @app.route('/unfavorite', methods=['POST'])
 @token_required
 def delete_favorite():
     try:
         data = request.get_json()
-        question_id = data.get('questionId') # This is the Message.id of the question being unfavorited
+        question_id = data.get('questionId')
         uid = request.uid
         current_connection = data.get('currentConnection')
-        question_content = data.get('questionContent') # Need this to find the favorite entry
-
+        question_content = data.get('questionContent')
         if not question_id or not uid or not current_connection or not question_content:
             return jsonify({'error': 'Question ID, content, connection, and user ID are required'}), 400
-
         question_message = Message.query.filter_by(id=question_id).first()
         if not question_message:
             return jsonify({'error': 'Question message not found'}), 404
-
         response_message = Message.query.filter_by(parent_id=question_id).first()
-
-        # Find the Favorite entry for this content
         favorite_entry = Favorite.query.filter_by(
             question_content=question_content,
             uid=uid,
             connection_name=current_connection
         ).first()
-
         if not favorite_entry:
             return jsonify({'error': 'Favorite entry not found for this content and connection'}), 404
-
-        # Decrement count and handle deletion
         favorite_entry.count -= 1
         count_after_decrement = favorite_entry.count
-
         if favorite_entry.count <= 0:
             db.session.delete(favorite_entry)
-            count_after_decrement = 0 # Explicitly set to 0 as it's deleted
-
-        # Set is_favorited flag on the specific messages
+            count_after_decrement = 0
         if question_message:
             question_message.is_favorited = False
         if response_message:
             response_message.is_favorited = False
-
         db.session.commit()
         return jsonify({'message': f'Favorite updated, count: {count_after_decrement}', 'count': count_after_decrement, 'isFavorited': False}), 200
     except Exception as e:
@@ -1091,46 +1010,33 @@ def delete_favorite():
         print(f"Error in delete_favorite: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-# Route to force delete a favorite
 @app.route('/favorite/delete', methods=['POST'])
 @token_required
 def force_delete_favorite():
     try:
         data = request.get_json()
-        question_id = data.get('questionId') # This is the Message.id of the question
+        question_id = data.get('questionId')
         uid = request.uid
-
         if not question_id or not uid:
             return jsonify({'error': 'Question ID and user ID are required'}), 400
-
-        # Find the specific question message
         question_message = Message.query.filter_by(id=question_id).first()
         if not question_message:
             return jsonify({'error': 'Question message not found'}), 404
-
-        # Find the favorite entry linked to this specific message's content
         favorite_entry_for_content = Favorite.query.filter_by(
             question_content=question_message.content,
             uid=uid,
-            connection_name=question_message.session.connection_name # Assuming session relation exists for message
+            connection_name=question_message.session.connection_name
         ).first()
-
         if not favorite_entry_for_content:
             return jsonify({'error': 'Favorite entry not found for this content'}), 404
-
-        # Decrement the count and delete if it drops to 0 or below
         favorite_entry_for_content.count -= 1
         if favorite_entry_for_content.count <= 0:
             db.session.delete(favorite_entry_for_content)
-
-        # Set is_favorited flag for this specific question message and its response
         question_message.is_favorited = False
         response_message = Message.query.filter_by(parent_id=question_id).first()
         if response_message:
             response_message.is_favorited = False
-
         db.session.commit()
-
         return jsonify({'message': f'Favorite for question {question_id} updated and potentially deleted'}), 200
     except Exception as e:
         db.session.rollback()
@@ -1160,7 +1066,7 @@ def get_recommended_questions():
         return jsonify(recommended_list), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    
+
 @app.route('/api/user/settings', methods=['POST'])
 @token_required
 def get_user_settings():
@@ -1168,7 +1074,6 @@ def get_user_settings():
         uid = request.uid
         settings = UserSettings.query.filter_by(uid=uid).first()
         if not settings:
-            # Create default settings if none exist
             settings = UserSettings(uid=uid)
             db.session.add(settings)
             db.session.commit()
@@ -1184,7 +1089,6 @@ def get_user_settings():
 def update_user_settings():
     try:
         data = request.get_json().get('settings', {})
-        print(data)
         uid = request.uid
         settings = UserSettings.query.filter_by(uid=uid).first()
         if not settings:
@@ -1204,14 +1108,12 @@ def update_user_settings():
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
-# New route for testing database connections
 @app.route('/testdbcon', methods=['POST'])
 def test_db_connection():
     data = request.get_json().get('connectionDetails')
     db_type = data.get('selectedDB')
     if db_type not in db_functions:
         return jsonify({'error': 'Unsupported or missing database type'}), 400
-
     connection_params = {
         'hostname': data.get('hostname'),
         'port': data.get('port'),
@@ -1219,18 +1121,14 @@ def test_db_connection():
         'password': data.get('password'),
         'database': data.get('database')
     }
-    
-    # Check if all required connection parameters are provided
     if not all(connection_params.values()):
         return jsonify({'error': 'All connection parameters are required'}), 400
-    
     try:
         message, status_code = db_functions[db_type](connection_params)
         return jsonify({'message': message}), status_code
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# Run the application
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)

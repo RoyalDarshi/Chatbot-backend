@@ -45,10 +45,10 @@ scheduler = BackgroundScheduler()
 def check_stalled_messages():
     with app.app_context():
         try:
-            two_minutes_ago = datetime.now(timezone.utc) - timedelta(minutes=2)
+            ten_minutes_ago = datetime.now(timezone.utc) - timedelta(minutes=10)
             stalled_messages = Message.query.filter(
                 Message.status == 'loading',
-                Message.created_at <= two_minutes_ago
+                Message.created_at <= ten_minutes_ago
             ).all()
             for message in stalled_messages:
                 message.content = "Sorry, an error occurred. Please try again."
@@ -841,6 +841,7 @@ def update_message(message_id):
     if not session:
         return jsonify({"error": "Session not found or unauthorized"}), 404
     message.content = content
+    message.status = 'normal'
     message.timestamp = datetime.now(timezone.utc)
     message.updated_at = datetime.now(timezone.utc)
     session.timestamp = datetime.now(timezone.utc)

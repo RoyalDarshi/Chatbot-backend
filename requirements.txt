@@ -11,3 +11,5 @@ mysql-connector-python
 pymongo
 # pyodbc # Uncomment if you enable MS SQL connection and install appropriate ODBC driver
 ibm_db # Uncomment if you enable DB2 connection
+# ibm_db # Uncomment if you enable DB2 connection
+apscheduler

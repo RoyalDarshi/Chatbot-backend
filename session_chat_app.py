@@ -48,6 +48,7 @@ def check_stalled_messages():
         try:
             ten_minutes_ago = datetime.now(timezone.utc) - timedelta(minutes=10)
             stalled_messages = Message.query.filter(
+                Message.is_bot == True,
                 Message.status == 'loading',
                 Message.created_at <= ten_minutes_ago
             ).all()
@@ -70,7 +71,7 @@ scheduler.start()
 def cleanup_loading_messages():
     with app.app_context():
         try:
-            stalled_messages = Message.query.filter_by(status='loading').all()
+            stalled_messages = Message.query.filter_by(status='loading', is_bot=True).all()
             for message in stalled_messages:
                 message.content = "Sorry, an error occurred. Please try again."
                 message.status = 'normal'
@@ -798,7 +799,7 @@ def create_message():
         parent_message = Message.query.filter_by(id=parent_id, session_id=session_id).first()
         if not parent_message or parent_message.is_bot:
             return jsonify({"error": "Invalid parent message"}), 400
-    status = 'loading' if content == 'loading...' else 'normal'
+    status = 'loading' if content == 'loading...' and is_bot else 'normal'
     message = Message(
         session_id=session_id,
         content=content,
@@ -842,7 +843,7 @@ def update_message(message_id):
     if not session:
         return jsonify({"error": "Session not found or unauthorized"}), 404
     message.content = content
-    message.status = 'normal'
+    message.status = 'loading' if content == 'loading...' and message.is_bot else 'normal'
     message.timestamp = datetime.now(timezone.utc)
     message.updated_at = datetime.now(timezone.utc)
     session.timestamp = datetime.now(timezone.utc)

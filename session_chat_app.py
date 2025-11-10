@@ -140,7 +140,7 @@ def cleanup_loading_messages():
                 app.logger.warning(f"Found {len(stalled_messages)} loading messages to clean up.")
                 for message in stalled_messages:
                     message.content = "Sorry, an error occurred. Please try again."
-                    message.status = 'normal'
+                    message.status = 'error' # <-- MODIFIED TO 'error'
                     message.updated_at = datetime.now(timezone.utc)
                     session = Session.query.filter_by(id=message.session_id).first()
                     if session:
@@ -1045,6 +1045,7 @@ def create_message():
         content = data.get('content')
         is_bot = data.get('isBot', False)
         parent_id = data.get('parentId', None)
+        status = data.get('status', 'normal') # <-- ADDED
         
         if not uid:
             return jsonify({"error": "Invalid token, UID required"}), 401
@@ -1062,7 +1063,11 @@ def create_message():
                 app.logger.error(f"Invalid parent message {parent_id} for bot reply in session {session_id}.") # --- ADDED ---
                 return jsonify({"error": "Invalid parent message"}), 400
         
-        status = 'loading' if content == 'loading...' and is_bot else 'normal'
+        # Ensure status is valid
+        if status not in ['normal', 'loading', 'error']:
+            app.logger.warning(f"Invalid status '{status}' provided. Defaulting to 'normal'.")
+            status = 'normal'
+
         message = Message(
             session_id=session_id,
             content=content,
@@ -1070,7 +1075,7 @@ def create_message():
             parent_id=parent_id,
             timestamp=datetime.now(timezone.utc),
             is_favorited=False,
-            status=status  # Added status
+            status=status  # <-- MODIFIED
         )
         session.timestamp = datetime.now(timezone.utc)
         db.session.add(message)
@@ -1105,6 +1110,8 @@ def update_message(message_id):
         data = request.get_json()
         uid = request.uid
         content = data.get('content')
+        status = data.get('status') # <-- ADDED
+
         if not uid:
             return jsonify({"error": "Invalid token, UID required"}), 401
         
@@ -1123,8 +1130,16 @@ def update_message(message_id):
             app.logger.error(f"Data integrity issue: Message {message_id} found but session {message.session_id} not found for user {uid}.") # --- ADDED ---
             return jsonify({"error": "Session not found or unauthorized"}), 404
         
-        message.content = content
-        message.status = 'loading' if content == 'loading...' and message.is_bot else 'normal'
+        if content is not None:
+            message.content = content
+        
+        if status is not None:
+             # Ensure status is valid
+            if status not in ['normal', 'loading', 'error']:
+                app.logger.warning(f"Invalid status '{status}' provided for update. Ignoring status update.")
+            else:
+                message.status = status
+        
         message.timestamp = datetime.now(timezone.utc)
         message.updated_at = datetime.now(timezone.utc)
         session.timestamp = datetime.now(timezone.utc)
@@ -1153,10 +1168,6 @@ def get_message(message_id):
         if not session:
             app.logger.warning(f"User {uid} failed to get message: Unauthorized for message {message_id}.") # --- ADDED ---
             return jsonify({"error": "Unauthorized access to message"}), 403
-
-        # --- MODIFIED: Replaced print with logger (and set to DEBUG level) ---
-        app.logger.debug(f"🕓 NOW: {datetime.now(timezone.utc)}")
-        app.logger.debug(f"🕓 Message {message_id} created_at: {message.created_at}")
 
         response = {
             "id": message.id,

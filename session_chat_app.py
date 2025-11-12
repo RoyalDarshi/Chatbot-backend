@@ -26,8 +26,8 @@ import sys
 import psycopg2
 import mysql.connector
 import pyodbc  # Added for MSSQL
-# import pyodbc  # Added for MSSQL
 import pymongo
+import ibm_db  # <-- ADDED FOR DB2
 
 # --- MODIFIED: Load .env first ---
 load_dotenv()
@@ -290,11 +290,63 @@ def connect_mongodb(connection_params):
         if client is not None:
             client.close()
 
+# --- ADDED: DB2 Connection Function ---
+def connect_db2(connection_params):
+    conn = None
+    try:
+        hostname = connection_params['hostname']
+        port = connection_params['port']
+        database = connection_params['database']
+        username = connection_params['username']
+        password = connection_params['password']
+
+        # Create the DSN string for the connection
+        dsn = (
+            f"DATABASE={database};"
+            f"HOSTNAME={hostname};"
+            f"PORT={port};"
+            f"PROTOCOL=TCPIP;"
+        )
+        
+        # Attempt to connect
+        conn = ibm_db.connect(dsn, username, password)
+        
+        if conn:
+            return "DB2 connection successful!", 200
+        else:
+            # Get the error message from the ibm_db driver
+            error_msg = ibm_db.conn_errormsg()
+            app.logger.warning(f"DB2 connection failed: {error_msg}")
+            return f"DB2 connection failed: {error_msg}", 400
+
+    except KeyError as e:
+        app.logger.error(f"DB2 missing required connection parameter: {str(e)}", exc_info=True)
+        return f"Missing required connection parameter: {str(e)}", 400
+    except Exception as e:
+        # Catch other errors
+        error_msg = str(e)
+        try:
+            # Try to get a more specific DB2 error if available
+            error_msg = ibm_db.conn_errormsg() or error_msg
+        except:
+            pass # ibm_db might not be available to get the error
+        app.logger.error(f"DB2 unexpected error: {error_msg}", exc_info=True)
+        return f"DB2 unexpected error: {error_msg}", 500
+    finally:
+        if conn:
+            try:
+                ibm_db.close(conn)
+            except Exception as e:
+                app.logger.error(f"Error closing DB2 connection: {str(e)}", exc_info=True)
+                pass
+# --- END ADDED ---
+
 db_functions = {
     'postgresql': connect_postgresql,
     'mysql': connect_mysql,
     'mssql': connect_mssql,
-    'mongodb': connect_mongodb
+    'mongodb': connect_mongodb,
+    'db2': connect_db2  # <-- ADDED
 }
 
 # Define the User model
@@ -1250,7 +1302,7 @@ def add_favorite():
         question_message.is_favorited = True
         if response_message:
             response_message.is_favorited = True
-            
+        
         favorite_entry = Favorite.query.filter_by(
             question_content=question_content,
             connection_name=connection,
@@ -1292,6 +1344,10 @@ def get_favorites():
         favorites_list = []
         for fav in favorites:
             question_msg = Message.query.filter_by(id=fav.question_id).first()
+            # increase count with 1
+            fav.count += 1
+            db.session.commit()
+            
             is_favorited_in_message = question_msg.is_favorited if question_msg else False
             favorites_list.append({
                 'question_id': fav.question_id,

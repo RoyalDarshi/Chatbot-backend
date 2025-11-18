@@ -499,58 +499,63 @@ class UserSettings(db.Model):
     notifications_enabled = db.Column(db.Boolean, default=True)
     auto_save_chats = db.Column(db.Boolean, default=True)
 
-with app.app_context():
-    db.create_all()
-
-# Route to populate users (for development/testing only)
-@app.route('/populate-users', methods=['POST'])
-# @admin_required
-def populate_users():
+def seed_initial_users():
+    """
+    Checks if users exist in the database.
+    If not, creates default users automatically.
+    """
     try:
-        # Check if users already exist to avoid duplicates
-        if User.query.count() > 0:
-            app.logger.warning("Attempted to populate users, but users already exist.") # --- ADDED ---
-            return jsonify({'message': 'Users already populated'}), 400
+        # Check if any user exists to avoid duplicates
+        if User.query.first() is not None:
+            app.logger.info("Database already contains users. Skipping auto-population.")
+            return
+
+        app.logger.info("No users found. seeding default users...")
 
         users = [
             {
                 'username': 'user1',
                 'email': 'user1@example.com',
-                'password': generate_password_hash('user1')
+                'password': 'user1' # Plain text here, will be hashed below
             },
             {
                 'username': 'user2',
                 'email': 'user2@example.com',
-                'password': generate_password_hash('user2')
+                'password': 'user2'
             },
             {
                 'username': 'user3',
                 'email': 'user3@example.com',
-                'password': generate_password_hash('user3')
+                'password': 'user3'
             },
             {
                 'username': 'user4',
                 'email': 'user4@example.com',
-                'password': generate_password_hash('user4')
+                'password': 'user4'
             }
         ]
 
         for user_data in users:
+            # Hash the password before storing
+            hashed_pw = generate_password_hash(user_data['password'])
+            
             user = User(
                 username=user_data['username'],
                 email=user_data['email'],
-                password=user_data['password']
+                password=hashed_pw
             )
             db.session.add(user)
 
         db.session.commit()
-        app.logger.info("Successfully populated 4 users.") # --- ADDED ---
-        return jsonify({'message': '4 users created successfully'}), 201
+        app.logger.info(f"Successfully auto-populated {len(users)} default users.")
+
     except Exception as e:
         db.session.rollback()
-        # --- ADDED: Exception logging ---
-        app.logger.error(f"Error in populate_users: {str(e)}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        app.logger.error(f"Error during user auto-population: {str(e)}", exc_info=True)
+
+with app.app_context():
+    db.create_all()
+    seed_initial_users()
 
 serializer = URLSafeTimedSerializer(app.config['SECRET_KEY'])
 

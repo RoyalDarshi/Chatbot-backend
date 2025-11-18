@@ -749,6 +749,41 @@ def validate_token():
         app.logger.error(f"Error during token validation: {str(e)}", exc_info=True)
         return jsonify({'message': 'An error occurred during token validation', 'valid': False}), 500
 
+@app.route('/user/change-password', methods=['POST'])
+@token_required
+def change_password():
+    try:
+        data = request.get_json()
+        uid = request.uid
+        old_password = data.get('oldPassword')
+        new_password = data.get('newPassword')
+
+        if not uid:
+             return jsonify({"error": "User identification failed"}), 401
+        
+        if not old_password or not new_password:
+            return jsonify({"error": "Old and new passwords are required"}), 400
+
+        user = User.query.filter_by(id=uid).first()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        # 1. Verify the old password
+        if not check_password_hash(user.password, old_password):
+             return jsonify({"error": "Incorrect current password"}), 401
+        
+        # 2. Hash and save the new password
+        user.password = generate_password_hash(new_password)
+        db.session.commit()
+        
+        app.logger.info(f"Password changed successfully for user {uid}")
+        return jsonify({"message": "Password changed successfully"}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error changing password for {request.uid}: {str(e)}", exc_info=True)
+        return jsonify({'error': 'Failed to change password'}), 500
+
 @app.route('/connections/user/create', methods=['POST'])
 @token_required
 def create_user_connection():

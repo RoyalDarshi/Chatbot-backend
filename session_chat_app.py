@@ -1059,7 +1059,13 @@ def get_sessions():
         sessions_list = []
         for session in sessions:
             messages_list = []
-            for msg in session.messages:
+            # Track the first user message for preview
+            first_user_message_index = None
+            for idx, msg in enumerate(session.messages):
+                if not msg.is_bot and first_user_message_index is None:
+                    first_user_message_index = idx
+            
+            for idx, msg in enumerate(session.messages):
                 favorite_count = 0
                 if not msg.is_bot:
                     favorite_entry = Favorite.query.filter_by(
@@ -1069,9 +1075,17 @@ def get_sessions():
                     ).first()
                     if favorite_entry:
                         favorite_count = favorite_entry.count
+                
+                # Only include content for the first user message (for preview)
+                # Exclude content for all other messages to reduce payload size
+                content_to_include = ""
+                if idx == first_user_message_index:
+                    # Truncate to 100 characters for preview
+                    content_to_include = msg.content[:100] if msg.content else ""
+                
                 messages_list.append({
                     "id": msg.id,
-                    "content": msg.content,
+                    "content": content_to_include,
                     "isBot": msg.is_bot,
                     "isFavorited": msg.is_favorited,
                     "parentId": msg.parent_id,

@@ -4,7 +4,7 @@ from dotenv import load_dotenv, dotenv_values, set_key
 from flask_sqlalchemy import SQLAlchemy
 from itsdangerous import URLSafeTimedSerializer, BadSignature
 from datetime import datetime, timezone, timedelta
-from sqlalchemy import or_
+from sqlalchemy import or_, func, and_
 from werkzeug.security import check_password_hash, generate_password_hash
 from ldap3 import Server, Connection, ALL, SUBTREE, AUTO_BIND_TLS_BEFORE_BIND, Tls
 from ldap3.utils.conv import escape_filter_chars
@@ -1050,62 +1050,75 @@ def create_session():
 @app.route('/api/fetchsessions', methods=['POST'])
 @token_required
 def get_sessions():
-    # --- ADDED: try/except block ---
     try:
         uid = request.uid
+        data = request.get_json()
+        filter_type = data.get('filter', 'all') # Get filter from request
+        
         if not uid:
             return jsonify({"error": "Invalid token, UID required"}), 401
-        sessions = Session.query.filter_by(uid=uid).order_by(Session.timestamp.desc()).all()
+
+        # Base query
+        query = Session.query.filter_by(uid=uid)
+
+        # Date Filtering Logic
+        now_utc = datetime.now(timezone.utc)
+        today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        if filter_type == 'today':
+            query = query.filter(Session.timestamp >= today_start)
+        elif filter_type == 'yesterday':
+            yesterday_start = today_start - timedelta(days=1)
+            query = query.filter(and_(Session.timestamp >= yesterday_start, Session.timestamp < today_start))
+        elif filter_type == 'last7days':
+            seven_days_ago = today_start - timedelta(days=7)
+            # Exclude today/yesterday if you want strict ranges, 
+            # but usually "last 7 days" implies a range up to now. 
+            # Based on your previous frontend logic, it was 2 to 7 days ago.
+            # We will use the standard "past 7 days including today" or match your specific previous logic.
+            # Matching previous logic: 7 days ago up to 2 days ago
+            two_days_ago = today_start - timedelta(days=2)
+            query = query.filter(and_(Session.timestamp >= seven_days_ago, Session.timestamp <= two_days_ago))
+        elif filter_type == 'last1month':
+            thirty_days_ago = today_start - timedelta(days=30)
+            eight_days_ago = today_start - timedelta(days=8)
+            query = query.filter(and_(Session.timestamp >= thirty_days_ago, Session.timestamp <= eight_days_ago))
+        
+        # Order by timestamp descending
+        sessions = query.order_by(Session.timestamp.desc()).all()
+        
         sessions_list = []
+        
         for session in sessions:
-            messages_list = []
-            # Track the first user message for preview
-            first_user_message_index = None
-            for idx, msg in enumerate(session.messages):
-                if not msg.is_bot and first_user_message_index is None:
-                    first_user_message_index = idx
+            # OPTIMIZATION: Do not fetch all messages. 
+            # 1. Get Count
+            msg_count = Message.query.filter_by(session_id=session.id).count()
+
+            # 2. Get Preview (First User Message)
+            # We explicitly look for a message that has content to use as a preview
+            first_msg = Message.query.filter(
+                Message.session_id == session.id,
+                Message.content != None,
+                Message.content != ""
+            ).order_by(Message.timestamp.asc()).first()
             
-            for idx, msg in enumerate(session.messages):
-                favorite_count = 0
-                if not msg.is_bot:
-                    favorite_entry = Favorite.query.filter_by(
-                        question_content=msg.content,
-                        uid=uid,
-                        connection_name=session.connection_name
-                    ).first()
-                    if favorite_entry:
-                        favorite_count = favorite_entry.count
-                
-                # Only include content for the first user message (for preview)
-                # Exclude content for all other messages to reduce payload size
-                content_to_include = ""
-                if idx == first_user_message_index:
-                    # Truncate to 100 characters for preview
-                    content_to_include = msg.content[:100] if msg.content else ""
-                
-                messages_list.append({
-                    "id": msg.id,
-                    "content": content_to_include,
-                    "isBot": msg.is_bot,
-                    "isFavorited": msg.is_favorited,
-                    "parentId": msg.parent_id,
-                    "timestamp": msg.timestamp.isoformat(),
-                    "reaction": msg.reaction,
-                    "dislike_reason": msg.dislike_reason,
-                    "favoriteCount": favorite_count,
-                    "status": msg.status  # Added status
-                })
+            preview_text = "No messages"
+            if first_msg:
+                preview_text = first_msg.content[:60] + ("..." if len(first_msg.content) > 60 else "")
+
             sessions_list.append({
                 "id": session.id,
                 "title": session.title,
                 "connection": session.connection_name,
                 "timestamp": session.timestamp.isoformat(),
-                "messages": messages_list
+                "messages": [], # Sending empty array to keep type consistency but save bandwidth
+                "messageCount": msg_count, # New field
+                "preview": preview_text    # New field
             })
+            
         return jsonify(sessions_list), 200
     except Exception as e:
         app.logger.error(f"Error fetching sessions for user {request.uid}: {str(e)}", exc_info=True)
-        # Note: db.session.rollback() might be needed here if a query fails midway
         return jsonify({'error': 'Failed to fetch sessions'}), 500
 
 @app.route('/api/sessions/<session_id>', methods=['GET'])

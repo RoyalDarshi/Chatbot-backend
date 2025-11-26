@@ -1134,7 +1134,7 @@ def get_session(session_id):
             app.logger.warning(f"User {uid} failed to get session: Not found or unauthorized for session {session_id}.") # --- ADDED ---
             return jsonify({"error": "Session not found or unauthorized"}), 404
         
-        messages = Message.query.filter_by(session_id=session_id).all()
+        messages = Message.query.filter_by(session_id=session_id).order_by(Message.timestamp.asc()).all()
         messages_list = []
         for msg in messages:
             favorite_count = 0

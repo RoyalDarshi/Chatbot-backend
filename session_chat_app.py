@@ -27,7 +27,7 @@ import psycopg2
 # import mysql.connector
 # import pyodbc  # Added for MSSQL
 import pymongo
-import ibm_db  # <-- ADDED FOR DB2
+# import ibm_db  # <-- ADDED FOR DB2
 
 # --- MODIFIED: Load .env first ---
 load_dotenv()

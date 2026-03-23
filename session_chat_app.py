@@ -553,9 +553,38 @@ def seed_initial_users():
         db.session.rollback()
         app.logger.error(f"Error during user auto-population: {str(e)}", exc_info=True)
 
+def seed_initial_admin():
+    """
+    Checks if an admin exists in the database.
+    If not, creates a default admin automatically.
+    """
+    try:
+        # Check if any admin exists to avoid duplicates
+        if Admin.query.first() is not None:
+            app.logger.info("Database already contains an admin. Skipping auto-population.")
+            return
+
+        app.logger.info("No admin found. Seeding default admin...")
+
+        # Hash the password before storing
+        hashed_pw = generate_password_hash('admin@123') # Change this to your preferred default password
+        
+        admin = Admin(
+            email='admin@admin.com', # Change this to your preferred default admin email
+            password=hashed_pw
+        )
+        db.session.add(admin)
+        db.session.commit()
+        app.logger.info("Successfully auto-populated default admin.")
+
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error during admin auto-population: {str(e)}", exc_info=True)
+
 with app.app_context():
     db.create_all()
     seed_initial_users()
+    seed_initial_admin()
 
 serializer = URLSafeTimedSerializer(app.config['SECRET_KEY'])
 
@@ -1670,6 +1699,99 @@ def update_user_settings():
         # --- ADDED: Exception logging ---
         app.logger.error(f"Error in update_user_settings for user {request.uid}: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
+
+# --- ADD THESE TO app.py ---
+
+@app.route('/api/admin/users', methods=['GET'])
+@admin_required
+def get_all_users():
+    try:
+        users = User.query.all()
+        users_list = [{
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'created_at': user.created_at.isoformat() if user.created_at else None
+        } for user in users]
+        return jsonify({'users': users_list}), 200
+    except Exception as e:
+        app.logger.error(f"Error fetching users: {str(e)}", exc_info=True)
+        return jsonify({'message': 'Failed to fetch users'}), 500
+
+@app.route('/api/admin/users', methods=['POST'])
+@admin_required
+def create_user_by_admin():
+    try:
+        data = request.get_json()
+        if not data.get('username') or not data.get('email') or not data.get('password'):
+            return jsonify({'message': 'Username, email, and password are required'}), 400
+            
+        if User.query.filter_by(username=data['username']).first() or User.query.filter_by(email=data['email']).first():
+            return jsonify({'message': 'User with this email or username already exists'}), 400
+
+        hashed_pw = generate_password_hash(data['password'])
+        new_user = User(
+            username=data['username'],
+            email=data['email'],
+            password=hashed_pw
+        )
+        db.session.add(new_user)
+        db.session.commit()
+        
+        app.logger.info(f"Admin {request.user_email} created user {data['username']}.")
+        return jsonify({'message': 'User created successfully'}), 201
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error creating user: {str(e)}", exc_info=True)
+        return jsonify({'message': 'Failed to create user'}), 500
+
+@app.route('/api/admin/users/<user_id>', methods=['PUT'])
+@admin_required
+def update_user_by_admin(user_id):
+    try:
+        data = request.get_json()
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'message': 'User not found'}), 404
+
+        if data.get('username'):
+            user.username = data['username']
+        if data.get('email'):
+            user.email = data['email']
+        if data.get('password'):  # Only update if a new password was provided
+            user.password = generate_password_hash(data['password'])
+            
+        user.updated_at = datetime.now(timezone.utc)
+        db.session.commit()
+        
+        app.logger.info(f"Admin {request.user_email} updated user {user.username}.")
+        return jsonify({'message': 'User updated successfully'}), 200
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error updating user {user_id}: {str(e)}", exc_info=True)
+        return jsonify({'message': 'Failed to update user'}), 500
+
+@app.route('/api/admin/users/<user_id>', methods=['DELETE'])
+@admin_required
+def delete_user_by_admin(user_id):
+    try:
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'message': 'User not found'}), 404
+            
+        # Optional: You may also want to cascade delete their sessions/connections here
+        # Session.query.filter_by(uid=user_id).delete()
+        # ConnectionDetails.query.filter_by(uid=user_id).delete()
+
+        db.session.delete(user)
+        db.session.commit()
+        
+        app.logger.info(f"Admin {request.user_email} deleted user {user.username}.")
+        return jsonify({'message': 'User deleted successfully'}), 200
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error deleting user {user_id}: {str(e)}", exc_info=True)
+        return jsonify({'message': 'Failed to delete user'}), 500
 
 @app.route('/testdbcon', methods=['POST'])
 def test_db_connection():

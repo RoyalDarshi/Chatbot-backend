@@ -1,5 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from dotenv import load_dotenv, dotenv_values, set_key
 from flask_sqlalchemy import SQLAlchemy
 from itsdangerous import URLSafeTimedSerializer, BadSignature
@@ -74,8 +76,18 @@ app = Flask(__name__)
 # --- MODIFIED: Set Flask's logger level from our config ---
 app.logger.setLevel(LOG_LEVEL)
 
-CORS(app, resources={r"/*": {"origins": "*"}})
+# --- MODIFIED: Restrict CORS origins via env variable ---
+allowed_origins = os.getenv('ALLOWED_ORIGINS', 'http://localhost:3000').split(',')
+CORS(app, resources={r"/*": {"origins": allowed_origins}})
 # load_dotenv() # --- MODIFIED: Moved to top ---
+
+# --- ADDED: Rate Limiter ---
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["1000 per day", "100 per hour"],
+    storage_uri=os.getenv("RATELIMIT_STORAGE_URI", "memory://")
+)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URI', 'sqlite:///users.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -705,6 +717,7 @@ def admin_required(f):
     return decorated
 
 @app.route('/login/user', methods=['POST'])
+@limiter.limit("10 per minute")
 def login_user():
     data = request.get_json()
     username = data.get("email")
@@ -721,6 +734,7 @@ def login_user():
     return jsonify({"error": "Invalid credentials"}), 401
 
 @app.route('/login/admin', methods=['POST'])
+@limiter.limit("10 per minute")
 def login_admin():
     data = request.get_json()
     email = data.get('email')
@@ -1840,4 +1854,12 @@ if __name__ == '__main__':
     # scheduler.start()
     # use_reloader=False
     
-    app.run(host=host, port=port, debug=True)
+    # --- MODIFIED: Production-ready server configuration ---
+    flask_env = os.getenv('FLASK_ENV', 'development')
+    if flask_env == 'production':
+        app.logger.info("Running in PRODUCTION mode using Waitress WSGI server.")
+        from waitress import serve
+        serve(app, host=host, port=port)
+    else:
+        app.logger.warning("Running in DEVELOPMENT mode with Werkzeug. Do not use in production.")
+        app.run(host=host, port=port, debug=True)

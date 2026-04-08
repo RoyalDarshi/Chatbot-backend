@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -8,6 +8,7 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature
 from datetime import datetime, timezone, timedelta
 from sqlalchemy import or_, func, and_
 from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.exceptions import HTTPException
 from ldap3 import Server, Connection, ALL, SUBTREE, AUTO_BIND_TLS_BEFORE_BIND, Tls
 from ldap3.utils.conv import escape_filter_chars
 from ldap3.utils.dn import escape_rdn
@@ -72,12 +73,17 @@ logging.getLogger('werkzeug').setLevel(logging.WARNING) # Werkzeug is Flask's se
 # --- END ADDED ---
 
 
-app = Flask(__name__)
+app = Flask(
+    __name__,
+    static_folder="../Slashcurate-chatbot/dist",
+    static_url_path=""
+)
 # --- MODIFIED: Set Flask's logger level from our config ---
 app.logger.setLevel(LOG_LEVEL)
 
 # --- MODIFIED: Restrict CORS origins via env variable ---
-allowed_origins = os.getenv('ALLOWED_ORIGINS', 'http://localhost:3000').split(',')
+allowed_origins = os.getenv('ALLOWED_ORIGINS', 'http://localhost:5000').split(',')
+allowed_origins_str = " ".join(allowed_origins)
 CORS(app, resources={r"/*": {"origins": allowed_origins}})
 # load_dotenv() # --- MODIFIED: Moved to top ---
 
@@ -190,11 +196,52 @@ def log_response_info(response):
 
 @app.errorhandler(Exception)
 def handle_unhandled_exception(e):
-    # Log the full exception traceback
-    app.logger.error(f"Unhandled Exception on endpoint {request.path}: {str(e)}", exc_info=True)
-    # Return a generic 500 error to the client
-    return jsonify({"error": "An internal server error occurred. Please try again later."}), 500
+    if isinstance(e, HTTPException):
+        return e  # let Flask handle 404, 403, etc.
+
+    app.logger.error(f"Unhandled Exception: {str(e)}", exc_info=True)
+    return jsonify({"error": "Internal server error"}), 500
 # --- END ADDED ---
+
+# --- ADDED: Security Headers Middleware ---
+@app.after_request
+def add_security_headers(response):
+    # Content Security Policy
+    csp = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com; "
+        "font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com; "
+        "img-src 'self' data: https:; "
+        f"connect-src 'self' {allowed_origins_str}; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
+    )
+    
+    # Security Headers
+    response.headers['Content-Security-Policy'] = csp
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['Permissions-Policy'] = (
+        'geolocation=(), '
+        'microphone=(), '
+        'camera=(), '
+        'payment=(), '
+        'usb=(), '
+        'magnetometer=(), '
+        'gyroscope=(), '
+        'accelerometer=()'
+    )
+    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    response.headers['Cross-Origin-Embedder-Policy'] = 'require-corp'
+    response.headers['Cross-Origin-Opener-Policy'] = 'same-origin'
+    response.headers['Cross-Origin-Resource-Policy'] = 'cross-origin'
+    
+    return response
+# --- END SECURITY HEADERS ---
 
 
 # Define the database connection functions
@@ -715,6 +762,18 @@ def admin_required(f):
         return f(*args, **kwargs)
     decorated.__name__ = f.__name__
     return decorated
+
+@app.route("/", defaults={"path": ""})
+@app.route("/<path:path>")
+def serve_react(path):
+    file_path = os.path.join(app.static_folder, path)
+
+    # If file exists → serve it
+    if path != "" and os.path.exists(file_path):
+        return send_from_directory(app.static_folder, path)
+
+    # Otherwise → serve React index.html
+    return send_from_directory(app.static_folder, "index.html")
 
 @app.route('/login/user', methods=['POST'])
 @limiter.limit("10 per minute")
@@ -1840,6 +1899,10 @@ def test_db_connection():
         # --- ADDED: Exception logging ---
         app.logger.error(f"Error in test_db_connection: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
+
+@app.errorhandler(404)
+def handle_404(e):
+    return "Not Found", 404
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))

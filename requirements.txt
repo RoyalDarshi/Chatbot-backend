@@ -14,3 +14,4 @@ ibm_db # Uncomment if you enable DB2 connection
 # ibm_db # Uncomment if you enable DB2 connection
 apscheduler
 Flask-Limiter
+waitress

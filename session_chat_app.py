@@ -8,6 +8,7 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature
 from datetime import datetime, timezone, timedelta
 from sqlalchemy import or_, func, and_
 from werkzeug.security import check_password_hash, generate_password_hash
+from cryptography.fernet import Fernet
 from werkzeug.exceptions import HTTPException
 from ldap3 import Server, Connection, ALL, SUBTREE, AUTO_BIND_TLS_BEFORE_BIND, Tls
 from ldap3.utils.conv import escape_filter_chars
@@ -73,9 +74,16 @@ logging.getLogger('werkzeug').setLevel(logging.WARNING) # Werkzeug is Flask's se
 # --- END ADDED ---
 
 
+DB_KEY = os.getenv("SECRET_DB_KEY")
+
+if not DB_KEY:
+    raise Exception("SECRET_DB_KEY is not set in environment")
+
+fernet = Fernet(DB_KEY.encode())
+
 app = Flask(
     __name__,
-    static_folder="../Slashcurate-chatbot/dist",
+    static_folder="../ui/dist",
     static_url_path=""
 )
 # --- MODIFIED: Set Flask's logger level from our config ---
@@ -146,6 +154,12 @@ db = SQLAlchemy(app)
 
 # scheduler.add_job(check_stalled_messages, 'interval', minutes=10)
 # scheduler.start()
+
+def encrypt_password(password: str) -> str:
+    return fernet.encrypt(password.encode()).decode()
+
+def decrypt_password(encrypted_password: str) -> str:
+    return fernet.decrypt(encrypted_password.encode()).decode()
 
 
 # Shutdown hook to clean up loading messages
@@ -764,15 +778,14 @@ def admin_required(f):
     return decorated
 
 @app.route("/", defaults={"path": ""})
+@app.route("/admin", defaults={"path": "/admin"})
 @app.route("/<path:path>")
 def serve_react(path):
     file_path = os.path.join(app.static_folder, path)
 
-    # If file exists → serve it
     if path != "" and os.path.exists(file_path):
         return send_from_directory(app.static_folder, path)
 
-    # Otherwise → serve React index.html
     return send_from_directory(app.static_folder, "index.html")
 
 @app.route('/login/user', methods=['POST'])
@@ -895,7 +908,7 @@ def create_user_connection():
         connection_details = data.get('connectionDetails', {})
         uid = request.uid
         password = connection_details.get('password', '')
-        hashed_password = serializer.dumps({'password': password}, salt=app.config['SECURITY_PASSWORD_SALT'])
+        encrypted_password = encrypt_password(password)
         new_connection = ConnectionDetails(
             uid=uid,
             connectionName=connection_details.get('connectionName', ''),
@@ -904,7 +917,7 @@ def create_user_connection():
             port=connection_details.get('port', 0),
             database=connection_details.get('database', ''),
             username=connection_details.get('username', ''),
-            password=hashed_password,
+            password=encrypted_password,
             selectedDB=connection_details.get('selectedDB', ''),
             isAdmin=False,
             created_at=datetime.now(timezone.utc)
@@ -927,7 +940,7 @@ def create_admin_connection():
         connection_details = data.get('connectionDetails', {})
         admin = Admin.query.filter_by(email=request.user_email).first()
         password = connection_details.get('password', '')
-        hashed_password = serializer.dumps({'password': password}, salt=app.config['SECURITY_PASSWORD_SALT'])
+        encrypted_password = encrypt_password(password)
         new_connection = ConnectionDetails(
             admin_id=admin.id,
             uid='',
@@ -937,7 +950,7 @@ def create_admin_connection():
             port=connection_details.get('port', 0),
             database=connection_details.get('database', ''),
             username=connection_details.get('username', ''),
-            password=hashed_password,
+            password=encrypted_password,
             selectedDB=connection_details.get('selectedDB', ''),
             isAdmin=True,
             created_at=datetime.now(timezone.utc)

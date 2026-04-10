@@ -573,82 +573,59 @@ class UserSettings(db.Model):
     auto_save_chats = db.Column(db.Boolean, default=True)
 
 def seed_initial_users():
-    """
-    Checks if users exist in the database.
-    If not, creates default users automatically.
-    """
     try:
-        # Check if any user exists to avoid duplicates
         if User.query.first() is not None:
             app.logger.info("Database already contains users. Skipping auto-population.")
             return
 
-        app.logger.info("No users found. seeding default users...")
+        app.logger.info("No users found. Seeding default users from .env...")
 
-        users = [
-            {
-                'username': 'user1',
-                'email': 'user1@example.com',
-                'password': 'user1' # Plain text here, will be hashed below
-            },
-            {
-                'username': 'user2',
-                'email': 'user2@example.com',
-                'password': 'user2'
-            },
-            {
-                'username': 'user3',
-                'email': 'user3@example.com',
-                'password': 'user3'
-            },
-            {
-                'username': 'user4',
-                'email': 'user4@example.com',
-                'password': 'user4'
-            }
-        ]
+        usernames = os.getenv("DEFAULT_USERS", "").split(",")
+        emails = os.getenv("DEFAULT_USER_EMAILS", "").split(",")
+        passwords = os.getenv("DEFAULT_USER_PASSWORDS", "").split(",")
 
-        for user_data in users:
-            # Hash the password before storing
-            hashed_pw = generate_password_hash(user_data['password'])
-            
+        for i in range(len(usernames)):
+            if not usernames[i]:
+                continue
+
+            hashed_pw = generate_password_hash(passwords[i])
+
             user = User(
-                username=user_data['username'],
-                email=user_data['email'],
+                username=usernames[i],
+                email=emails[i],
                 password=hashed_pw
             )
             db.session.add(user)
 
         db.session.commit()
-        app.logger.info(f"Successfully auto-populated {len(users)} default users.")
+        app.logger.info(f"Successfully seeded {len(usernames)} users from .env")
 
     except Exception as e:
         db.session.rollback()
         app.logger.error(f"Error during user auto-population: {str(e)}", exc_info=True)
 
 def seed_initial_admin():
-    """
-    Checks if an admin exists in the database.
-    If not, creates a default admin automatically.
-    """
     try:
-        # Check if any admin exists to avoid duplicates
         if Admin.query.first() is not None:
             app.logger.info("Database already contains an admin. Skipping auto-population.")
             return
 
-        app.logger.info("No admin found. Seeding default admin...")
+        app.logger.info("No admin found. Seeding default admin from .env...")
 
-        # Hash the password before storing
-        hashed_pw = generate_password_hash('admin@123') # Change this to your preferred default password
-        
+        email = os.getenv("DEFAULT_ADMIN_EMAIL")
+        password = os.getenv("DEFAULT_ADMIN_PASSWORD")
+
+        hashed_pw = generate_password_hash(password)
+
         admin = Admin(
-            email='admin@admin.com', # Change this to your preferred default admin email
+            email=email,
             password=hashed_pw
         )
+
         db.session.add(admin)
         db.session.commit()
-        app.logger.info("Successfully auto-populated default admin.")
+
+        app.logger.info("Successfully seeded default admin from .env")
 
     except Exception as e:
         db.session.rollback()

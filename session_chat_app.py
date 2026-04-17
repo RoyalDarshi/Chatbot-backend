@@ -502,8 +502,8 @@ class User(db.Model):
     username = db.Column(db.String(120), unique=True, nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password = db.Column(db.String(255), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.now(timezone.utc))
-    updated_at = db.Column(db.DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 class Admin(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -515,9 +515,9 @@ class Session(db.Model):
     uid = db.Column(db.String(255), nullable=False)
     title = db.Column(db.String(255), nullable=False)
     connection_name = db.Column(db.String(255), nullable=False)
-    timestamp = db.Column(db.DateTime, nullable=False, default=datetime.now(timezone.utc))
-    created_at = db.Column(db.DateTime, default=datetime.now(timezone.utc))
-    updated_at = db.Column(db.DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
+    timestamp = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 class Message(db.Model):
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -528,9 +528,9 @@ class Message(db.Model):
     parent_id = db.Column(db.String(36), db.ForeignKey('message.id'), nullable=True)
     reaction = db.Column(db.String(10), nullable=True)
     dislike_reason = db.Column(db.Text, nullable=True)
-    timestamp = db.Column(db.DateTime, nullable=False, default=datetime.now(timezone.utc))
-    created_at = db.Column(db.DateTime, default=datetime.now(timezone.utc))
-    updated_at = db.Column(db.DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
+    timestamp = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     status = db.Column(db.String(20), default='normal', nullable=False, index=True)  # Added status field
     session = db.relationship('Session', backref=db.backref('messages', lazy=True))
     parent = db.relationship('Message', remote_side=[id], backref='responses')
@@ -544,8 +544,8 @@ class Favorite(db.Model):
     connection_name = db.Column(db.String(255), nullable=False)
     uid = db.Column(db.String(255), nullable=False)
     count = db.Column(db.Integer, default=0)
-    created_at = db.Column(db.DateTime, default=datetime.now(timezone.utc))
-    updated_at = db.Column(db.DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     __table_args__ = (db.UniqueConstraint('question_content', 'connection_name', 'uid', name='_user_content_connection_uc'),)
 
 class ConnectionDetails(db.Model):
@@ -563,7 +563,7 @@ class ConnectionDetails(db.Model):
     password = db.Column(db.String(120), nullable=False)
     selectedDB = db.Column(db.String(120), nullable=False)
     isAdmin = db.Column(db.Boolean, default=False, nullable=False)
-    created_at = db.Column(db.DateTime, nullable=False, default=datetime.now(timezone.utc))
+    created_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
 
 class UserSettings(db.Model):
     uid = db.Column(db.String(255), primary_key=True)
@@ -1896,7 +1896,8 @@ def handle_404(e):
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
-    host = '0.0.0.0' # --- ADDED ---
+    # Default to localhost for security, allow override via environment variable
+    host = os.getenv('HOST', '127.0.0.1')
     
     # --- ADDED: Startup log message ---
     app.logger.info(f"Starting Session Chat App on {host}:{port}...")

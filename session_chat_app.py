@@ -83,7 +83,7 @@ fernet = Fernet(DB_KEY.encode())
 
 app = Flask(
     __name__,
-    static_folder="../ui/dist",
+    static_folder="../Slashcurate-chatbot/dist",
     static_url_path=""
 )
 # --- MODIFIED: Set Flask's logger level from our config ---
@@ -502,6 +502,7 @@ class User(db.Model):
     username = db.Column(db.String(120), unique=True, nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password = db.Column(db.String(255), nullable=False)
+    allowed_to_create_connection = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -563,7 +564,23 @@ class ConnectionDetails(db.Model):
     password = db.Column(db.String(120), nullable=False)
     selectedDB = db.Column(db.String(120), nullable=False)
     isAdmin = db.Column(db.Boolean, default=False, nullable=False)
+    isPublic = db.Column(db.Boolean, default=False, nullable=False)
     created_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
+class Group(db.Model):
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = db.Column(db.String(120), unique=True, nullable=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+class UserGroup(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    group_id = db.Column(db.String(36), db.ForeignKey('group.id'), nullable=False)
+    uid = db.Column(db.String(36), db.ForeignKey('user.id'), nullable=False)
+
+class GroupConnection(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    group_id = db.Column(db.String(36), db.ForeignKey('group.id'), nullable=False)
+    connection_id = db.Column(db.Integer, db.ForeignKey('connection_details.id'), nullable=False)
 
 class UserSettings(db.Model):
     uid = db.Column(db.String(255), primary_key=True)
@@ -631,8 +648,28 @@ def seed_initial_admin():
         db.session.rollback()
         app.logger.error(f"Error during admin auto-population: {str(e)}", exc_info=True)
 
+def migrate_schema():
+    try:
+        from sqlalchemy import text
+        try:
+            db.session.execute(text('ALTER TABLE user ADD COLUMN allowed_to_create_connection BOOLEAN DEFAULT 1'))
+            db.session.commit()
+            app.logger.info("Migrated: Added allowed_to_create_connection to user")
+        except Exception:
+            db.session.rollback()
+
+        try:
+            db.session.execute(text('ALTER TABLE connection_details ADD COLUMN isPublic BOOLEAN DEFAULT 0'))
+            db.session.commit()
+            app.logger.info("Migrated: Added isPublic to connection_details")
+        except Exception:
+            db.session.rollback()
+    except Exception as e:
+        app.logger.error(f"Migration error: {e}")
+
 with app.app_context():
     db.create_all()
+    migrate_schema()
     seed_initial_users()
     seed_initial_admin()
 
@@ -776,8 +813,12 @@ def login_user():
     user = User.query.filter_by(username=username).first()
     if user and check_password_hash(user.password, password):
         token = serializer.dumps({'uid': user.id}, salt=app.config['SECURITY_PASSWORD_SALT'])
-        app.logger.info(f"User '{username}' logged in successfully.") # --- ADDED ---
-        return jsonify({"message": "Login successful", "token": token}), 200
+        app.logger.info(f"User '{username}' logged in successfully.")
+        return jsonify({
+            "message": "Login successful", 
+            "token": token, 
+            "allowed_to_create_connection": getattr(user, 'allowed_to_create_connection', True)
+        }), 200
     
     app.logger.warning(f"Failed login attempt for user: '{username}'.") # --- ADDED ---
     return jsonify({"error": "Invalid credentials"}), 401
@@ -884,6 +925,10 @@ def create_user_connection():
         data = request.get_json()
         connection_details = data.get('connectionDetails', {})
         uid = request.uid
+        user = User.query.filter_by(id=uid).first()
+        if not user or not user.allowed_to_create_connection:
+            return jsonify({'error': 'You are not allowed to create a new connection'}), 403
+
         password = connection_details.get('password', '')
         encrypted_password = encrypt_password(password)
         new_connection = ConnectionDetails(
@@ -897,6 +942,7 @@ def create_user_connection():
             password=encrypted_password,
             selectedDB=connection_details.get('selectedDB', ''),
             isAdmin=False,
+            isPublic=connection_details.get('isPublic', False),
             created_at=datetime.now(timezone.utc)
         )
         db.session.add(new_connection)
@@ -930,6 +976,7 @@ def create_admin_connection():
             password=encrypted_password,
             selectedDB=connection_details.get('selectedDB', ''),
             isAdmin=True,
+            isPublic=connection_details.get('isPublic', False),
             created_at=datetime.now(timezone.utc)
         )
         db.session.add(new_connection)
@@ -948,8 +995,20 @@ def get_user_connections():
     try:
         uid = request.uid
         user_connections = ConnectionDetails.query.filter(ConnectionDetails.uid == uid).all()
-        admin_connections = ConnectionDetails.query.filter(ConnectionDetails.isAdmin == True).all()
-        all_connections = user_connections + admin_connections
+        public_admin_connections = ConnectionDetails.query.filter(ConnectionDetails.isAdmin == True, ConnectionDetails.isPublic == True).all()
+        
+        user_groups = UserGroup.query.filter_by(uid=uid).all()
+        group_ids = [ug.group_id for ug in user_groups]
+        shared_connections = []
+        if group_ids:
+            group_conns = GroupConnection.query.filter(GroupConnection.group_id.in_(group_ids)).all()
+            conn_ids = [gc.connection_id for gc in group_conns]
+            if conn_ids:
+                shared_connections = ConnectionDetails.query.filter(ConnectionDetails.id.in_(conn_ids)).all()
+        
+        all_connections_dict = {conn.id: conn for conn in (user_connections + public_admin_connections + shared_connections)}
+        all_connections = list(all_connections_dict.values())
+        
         connections_list = [
             {
                 'id': conn.id,
@@ -965,7 +1024,8 @@ def get_user_connections():
                 'maxTransportObjects': conn.maxTransportObjects,
                 'selectedDB': conn.selectedDB,
                 'created_at': conn.created_at.isoformat(),
-                'isAdmin': conn.isAdmin
+                'isAdmin': conn.isAdmin,
+                'isPublic': getattr(conn, 'isPublic', False)
             }
             for conn in all_connections
         ]
@@ -994,7 +1054,8 @@ def get_admin_connections():
                 'commandTimeout': conn.commandTimeout,
                 'maxTransportObjects': conn.maxTransportObjects,
                 'selectedDB': conn.selectedDB,
-                'created_at': conn.created_at.isoformat()
+                'created_at': conn.created_at.isoformat(),
+                'isPublic': getattr(conn, 'isPublic', False)
             }
             for conn in all_connections
         ]
@@ -1774,6 +1835,7 @@ def get_all_users():
             'id': user.id,
             'username': user.username,
             'email': user.email,
+            'allowed_to_create_connection': getattr(user, 'allowed_to_create_connection', True),
             'created_at': user.created_at.isoformat() if user.created_at else None
         } for user in users]
         return jsonify({'users': users_list}), 200
@@ -1796,7 +1858,8 @@ def create_user_by_admin():
         new_user = User(
             username=data['username'],
             email=data['email'],
-            password=hashed_pw
+            password=hashed_pw,
+            allowed_to_create_connection=data.get('allowedToCreateConnection', True)
         )
         db.session.add(new_user)
         db.session.commit()
@@ -1823,6 +1886,9 @@ def update_user_by_admin(user_id):
             user.email = data['email']
         if data.get('password'):  # Only update if a new password was provided
             user.password = generate_password_hash(data['password'])
+
+        if 'allowedToCreateConnection' in data:
+            user.allowed_to_create_connection = data['allowedToCreateConnection']
             
         user.updated_at = datetime.now(timezone.utc)
         db.session.commit()
@@ -1855,6 +1921,83 @@ def delete_user_by_admin(user_id):
         db.session.rollback()
         app.logger.error(f"Error deleting user {user_id}: {str(e)}", exc_info=True)
         return jsonify({'message': 'Failed to delete user'}), 500
+
+@app.route('/api/admin/groups', methods=['GET'])
+@admin_required
+def get_all_groups():
+    try:
+        groups = Group.query.all()
+        return jsonify({'groups': [{'id': g.id, 'name': g.name} for g in groups]}), 200
+    except Exception as e:
+        app.logger.error(f"Error fetching groups: {e}")
+        return jsonify({'error': 'Failed to fetch groups'}), 500
+
+@app.route('/api/admin/groups', methods=['POST'])
+@admin_required
+def create_group():
+    try:
+        data = request.get_json()
+        name = data.get('name')
+        if not name:
+            return jsonify({'error': 'Group name required'}), 400
+        new_group = Group(name=name)
+        db.session.add(new_group)
+        db.session.commit()
+        return jsonify({'message': 'Group created', 'id': new_group.id}), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': 'Failed to create group'}), 500
+
+@app.route('/api/admin/groups/<group_id>', methods=['DELETE'])
+@admin_required
+def delete_group(group_id):
+    try:
+        group = Group.query.get(group_id)
+        if not group:
+            return jsonify({'error': 'Group not found'}), 404
+        UserGroup.query.filter_by(group_id=group_id).delete()
+        GroupConnection.query.filter_by(group_id=group_id).delete()
+        db.session.delete(group)
+        db.session.commit()
+        return jsonify({'message': 'Group deleted'}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': 'Failed to delete group'}), 500
+
+@app.route('/api/admin/groups/<group_id>/mapping', methods=['GET'])
+@admin_required
+def get_group_mapping(group_id):
+    try:
+        user_groups = UserGroup.query.filter_by(group_id=group_id).all()
+        group_conns = GroupConnection.query.filter_by(group_id=group_id).all()
+        return jsonify({
+            'users': [ug.uid for ug in user_groups],
+            'connections': [gc.connection_id for gc in group_conns]
+        }), 200
+    except Exception as e:
+        return jsonify({'error': 'Failed to fetch mapping'}), 500
+
+@app.route('/api/admin/groups/<group_id>/mapping', methods=['POST'])
+@admin_required
+def save_group_mapping(group_id):
+    try:
+        data = request.get_json()
+        users = data.get('users', [])
+        connections = data.get('connections', [])
+        
+        UserGroup.query.filter_by(group_id=group_id).delete()
+        GroupConnection.query.filter_by(group_id=group_id).delete()
+        
+        for uid in users:
+            db.session.add(UserGroup(group_id=group_id, uid=uid))
+        for cid in connections:
+            db.session.add(GroupConnection(group_id=group_id, connection_id=cid))
+            
+        db.session.commit()
+        return jsonify({'message': 'Mappings saved'}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': 'Failed to save mapping'}), 500
 
 @app.route('/testdbcon', methods=['POST'])
 def test_db_connection():

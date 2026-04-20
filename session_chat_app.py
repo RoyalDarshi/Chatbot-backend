@@ -503,6 +503,7 @@ class User(db.Model):
     email = db.Column(db.String(120), unique=True, nullable=False)
     password = db.Column(db.String(255), nullable=False)
     allowed_to_create_connection = db.Column(db.Boolean, default=True)
+    allowed_to_create_public_connection = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -516,6 +517,7 @@ class Session(db.Model):
     uid = db.Column(db.String(255), nullable=False)
     title = db.Column(db.String(255), nullable=False)
     connection_name = db.Column(db.String(255), nullable=False)
+    con_id = db.Column(db.Integer, nullable=True)
     timestamp = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
@@ -544,16 +546,17 @@ class Favorite(db.Model):
     response_query = db.Column(db.String(500), nullable=True)
     connection_name = db.Column(db.String(255), nullable=False)
     uid = db.Column(db.String(255), nullable=False)
+    con_id = db.Column(db.Integer, nullable=True)
     count = db.Column(db.Integer, default=0)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-    __table_args__ = (db.UniqueConstraint('question_content', 'connection_name', 'uid', name='_user_content_connection_uc'),)
+    __table_args__ = (db.UniqueConstraint('question_content', 'con_id', 'uid', name='_user_content_connection_uc'),)
 
 class ConnectionDetails(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     admin_id = db.Column(db.Integer, db.ForeignKey('admin.id'), nullable=True)
     uid = db.Column(db.String(120), nullable=False)
-    connectionName = db.Column(db.String(120), nullable=False, unique=True)
+    connectionName = db.Column(db.String(120), nullable=False)
     description = db.Column(db.String(255))
     hostname = db.Column(db.String(120), nullable=False)
     port = db.Column(db.Integer, nullable=False)
@@ -566,6 +569,7 @@ class ConnectionDetails(db.Model):
     isAdmin = db.Column(db.Boolean, default=False, nullable=False)
     isPublic = db.Column(db.Boolean, default=False, nullable=False)
     created_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (db.UniqueConstraint('uid', 'connectionName', name='_user_connection_uc'),)
 
 class Group(db.Model):
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -817,7 +821,9 @@ def login_user():
         return jsonify({
             "message": "Login successful", 
             "token": token, 
-            "allowed_to_create_connection": getattr(user, 'allowed_to_create_connection', True)
+            "uid": user.id,
+            "allowed_to_create_connection": getattr(user, 'allowed_to_create_connection', True),
+            "allowed_to_create_public_connection": getattr(user, 'allowed_to_create_public_connection', True)
         }), 200
     
     app.logger.warning(f"Failed login attempt for user: '{username}'.") # --- ADDED ---
@@ -928,6 +934,10 @@ def create_user_connection():
         user = User.query.filter_by(id=uid).first()
         if not user or not user.allowed_to_create_connection:
             return jsonify({'error': 'You are not allowed to create a new connection'}), 403
+
+        is_public = connection_details.get('isPublic', False)
+        if is_public and not getattr(user, 'allowed_to_create_public_connection', True):
+            return jsonify({'error': 'You are not allowed to create a public connection'}), 403
 
         password = connection_details.get('password', '')
         encrypted_password = encrypt_password(password)
@@ -1116,6 +1126,76 @@ def delete_connection():
         app.logger.error(f"Error deleting connection {connection_id} for {uid or email}: {str(e)}", exc_info=True)
         return jsonify({'error': 'Failed to delete connection'}), 500
 
+@app.route('/connections/update', methods=['POST'])
+@token_required
+def update_connection():
+    try:
+        data = request.get_json()
+        connection_id = data.get('connectionId')
+        connection_details = data.get('connectionDetails', {})
+        uid = request.uid
+
+        if not connection_id:
+            return jsonify({'message': 'connectionId is required'}), 400
+
+        # Only the owner can edit their connection
+        connection = ConnectionDetails.query.filter_by(
+            id=connection_id,
+            uid=uid,
+            isAdmin=False
+        ).first()
+
+        if not connection:
+            app.logger.warning(f"Update unauthorized or not found. ID: {connection_id}, User: {uid}")
+            return jsonify({'message': 'Connection not found or you do not have permission to edit it'}), 403
+
+        # Apply updates (only non-empty fields to avoid overwriting with blanks)
+        if connection_details.get('connectionName'):
+            # Check uniqueness for this user
+            existing = ConnectionDetails.query.filter_by(
+                uid=uid,
+                connectionName=connection_details['connectionName']
+            ).filter(ConnectionDetails.id != connection_id).first()
+            if existing:
+                return jsonify({'message': f"You already have a connection named '{connection_details['connectionName']}'"}), 409
+            connection.connectionName = connection_details['connectionName']
+
+        if connection_details.get('description') is not None:
+            connection.description = connection_details['description']
+        if connection_details.get('hostname'):
+            connection.hostname = connection_details['hostname']
+        if connection_details.get('port'):
+            connection.port = int(connection_details['port'])
+        if connection_details.get('database'):
+            connection.database = connection_details['database']
+        if connection_details.get('username'):
+            connection.username = connection_details['username']
+        if connection_details.get('password'):
+            connection.password = connection_details['password']
+        if connection_details.get('selectedDB'):
+            connection.selectedDB = connection_details['selectedDB']
+        if connection_details.get('commandTimeout') is not None:
+            connection.commandTimeout = connection_details['commandTimeout']
+        if connection_details.get('maxTransportObjects') is not None:
+            connection.maxTransportObjects = connection_details['maxTransportObjects']
+        if 'isPublic' in connection_details:
+            # Validate public permission
+            if connection_details['isPublic']:
+                user = User.query.filter_by(id=uid).first()
+                if not getattr(user, 'allowed_to_create_public_connection', True) == False:
+                    connection.isPublic = connection_details['isPublic']
+            else:
+                connection.isPublic = False
+
+        db.session.commit()
+        app.logger.info(f"Connection ID {connection_id} updated by user {uid}.")
+        return jsonify({'message': 'Connection updated successfully'}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error updating connection {data.get('connectionId')}: {str(e)}", exc_info=True)
+        return jsonify({'error': 'Failed to update connection'}), 500
+
 @app.route('/ldap-config', methods=['POST'])
 @admin_required
 def set_ldap_config():
@@ -1177,13 +1257,18 @@ def create_session():
         title = data.get('title')
         if not title:
             return jsonify({"error": "Title is required"}), 400
-        connection=data.get('currentConnection')
-        if not connection:
-            return jsonify({"error": "Connection is required"}), 400
+        con_id = data.get('con_id')
+        if not con_id:
+            return jsonify({"error": "con_id is required"}), 400
+        conn = ConnectionDetails.query.get(con_id)
+        if not conn:
+            return jsonify({"error": "Connection not found"}), 404
+        
         session = Session(
             uid=uid,
             title=title,
-            connection_name=connection,
+            connection_name=conn.connectionName,
+            con_id=con_id,
             timestamp=datetime.now(timezone.utc)
         )
         db.session.add(session)
@@ -1295,7 +1380,7 @@ def get_session(session_id):
                 favorite_entry = Favorite.query.filter_by(
                     question_content=msg.content,
                     uid=uid,
-                    connection_name=session.connection_name
+                    con_id=session.con_id
                 ).first()
                 if favorite_entry:
                     favorite_count = favorite_entry.count
@@ -1593,13 +1678,20 @@ def add_favorite():
         response_message = Message.query.filter_by(parent_id=question_id).first()
         response_id = response_message.id if response_message else None
         
+        con_id = data.get('con_id')
+        if not con_id:
+            return jsonify({'error': 'con_id is required'}), 400
+        conn = ConnectionDetails.query.get(con_id)
+        if not conn:
+            return jsonify({'error': 'Connection not found'}), 404
+            
         question_message.is_favorited = True
         if response_message:
             response_message.is_favorited = True
         
         favorite_entry = Favorite.query.filter_by(
             question_content=question_content,
-            connection_name=connection,
+            con_id=con_id,
             uid=uid
         ).first()
         
@@ -1614,7 +1706,8 @@ def add_favorite():
                 question_content=question_content,
                 response_id=response_id,
                 response_query=response_query,
-                connection_name=connection,
+                connection_name=conn.connectionName,
+                con_id=con_id,
                 count=1,
                 uid=uid
             )
@@ -1676,10 +1769,14 @@ def delete_favorite():
             
         response_message = Message.query.filter_by(parent_id=question_id).first()
         
+        con_id = data.get('con_id')
+        if not con_id:
+            return jsonify({'error': 'con_id is required'}), 400
+            
         favorite_entry = Favorite.query.filter_by(
             question_content=question_content,
             uid=uid,
-            connection_name=current_connection
+            con_id=con_id
         ).first()
         
         if not favorite_entry:
@@ -1720,10 +1817,13 @@ def force_delete_favorite():
         if not question_message:
             return jsonify({'error': 'Question message not found'}), 404
             
+        session = getattr(question_message, 'session', None)
+        con_id_filter = session.con_id if session else None
+        
         favorite_entry_for_content = Favorite.query.filter_by(
             question_content=question_message.content,
             uid=uid,
-            connection_name=question_message.session.connection_name
+            con_id=con_id_filter
         ).first()
         
         if not favorite_entry_for_content:
@@ -1836,6 +1936,7 @@ def get_all_users():
             'username': user.username,
             'email': user.email,
             'allowed_to_create_connection': getattr(user, 'allowed_to_create_connection', True),
+            'allowed_to_create_public_connection': getattr(user, 'allowed_to_create_public_connection', True),
             'created_at': user.created_at.isoformat() if user.created_at else None
         } for user in users]
         return jsonify({'users': users_list}), 200
@@ -1859,7 +1960,8 @@ def create_user_by_admin():
             username=data['username'],
             email=data['email'],
             password=hashed_pw,
-            allowed_to_create_connection=data.get('allowedToCreateConnection', True)
+            allowed_to_create_connection=data.get('allowedToCreateConnection', True),
+            allowed_to_create_public_connection=data.get('allowedToCreatePublicConnection', True)
         )
         db.session.add(new_user)
         db.session.commit()
@@ -1889,6 +1991,8 @@ def update_user_by_admin(user_id):
 
         if 'allowedToCreateConnection' in data:
             user.allowed_to_create_connection = data['allowedToCreateConnection']
+        if 'allowedToCreatePublicConnection' in data:
+            user.allowed_to_create_public_connection = data['allowedToCreatePublicConnection']
             
         user.updated_at = datetime.now(timezone.utc)
         db.session.commit()

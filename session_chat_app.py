@@ -995,7 +995,7 @@ def get_user_connections():
     try:
         uid = request.uid
         user_connections = ConnectionDetails.query.filter(ConnectionDetails.uid == uid).all()
-        public_admin_connections = ConnectionDetails.query.filter(ConnectionDetails.isAdmin == True, ConnectionDetails.isPublic == True).all()
+        public_connections = ConnectionDetails.query.filter(ConnectionDetails.isPublic == True).all()
         
         user_groups = UserGroup.query.filter_by(uid=uid).all()
         group_ids = [ug.group_id for ug in user_groups]
@@ -1006,7 +1006,7 @@ def get_user_connections():
             if conn_ids:
                 shared_connections = ConnectionDetails.query.filter(ConnectionDetails.id.in_(conn_ids)).all()
         
-        all_connections_dict = {conn.id: conn for conn in (user_connections + public_admin_connections + shared_connections)}
+        all_connections_dict = {conn.id: conn for conn in (user_connections + public_connections + shared_connections)}
         all_connections = list(all_connections_dict.values())
         
         connections_list = [

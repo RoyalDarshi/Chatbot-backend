@@ -1171,7 +1171,7 @@ def update_connection():
         if connection_details.get('username'):
             connection.username = connection_details['username']
         if connection_details.get('password'):
-            connection.password = connection_details['password']
+            connection.password = encrypt_password(connection_details['password'])
         if connection_details.get('selectedDB'):
             connection.selectedDB = connection_details['selectedDB']
         if connection_details.get('commandTimeout') is not None:

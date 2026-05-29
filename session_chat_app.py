@@ -1680,7 +1680,12 @@ def add_favorite():
         
         con_id = data.get('con_id')
         if not con_id:
+            session_obj = getattr(question_message, 'session', None)
+            con_id = session_obj.con_id if session_obj else None
+            
+        if not con_id:
             return jsonify({'error': 'con_id is required'}), 400
+            
         conn = ConnectionDetails.query.get(con_id)
         if not conn:
             return jsonify({'error': 'Connection not found'}), 404
@@ -1770,6 +1775,10 @@ def delete_favorite():
         response_message = Message.query.filter_by(parent_id=question_id).first()
         
         con_id = data.get('con_id')
+        if not con_id:
+            session_obj = getattr(question_message, 'session', None)
+            con_id = session_obj.con_id if session_obj else None
+            
         if not con_id:
             return jsonify({'error': 'con_id is required'}), 400
             

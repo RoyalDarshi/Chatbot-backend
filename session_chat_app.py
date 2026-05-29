@@ -1857,6 +1857,7 @@ def force_delete_favorite():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/recommended_questions', methods=['POST'])
+@limiter.exempt
 @token_required
 def get_recommended_questions():
     try:

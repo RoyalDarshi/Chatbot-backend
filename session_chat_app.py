@@ -95,11 +95,9 @@ allowed_origins_str = " ".join(allowed_origins)
 CORS(app, resources={r"/*": {"origins": allowed_origins}})
 # load_dotenv() # --- MODIFIED: Moved to top ---
 
-# --- ADDED: Rate Limiter ---
 limiter = Limiter(
     get_remote_address,
     app=app,
-    default_limits=["1000 per day", "100 per hour"],
     storage_uri=os.getenv("RATELIMIT_STORAGE_URI", "memory://")
 )
 
@@ -130,19 +128,18 @@ db = SQLAlchemy(app)
 #             ).all()
             
 #             # --- MODIFIED: Replaced print with logger ---
-#             app.logger.debug(f"[Scheduler] Now: {datetime.utcnow()} | Checking messages older than: {ten_minutes_ago}")
+#             app.logger.debug(f"[Scheduler] Now: {datetime.now(timezone.utc)} | Checking messages older than: {ten_minutes_ago}")
             
 #             if len(stalled_messages) > 0:
 #                 app.logger.warning(f"[Scheduler] Found stalled messages: {len(stalled_messages)}")
-
+ 
 #                 for message in stalled_messages:
 #                     app.logger.warning(f"⏳ Stalled message detected: {message.id} (created at {message.created_at})")
 #                     message.content = "Sorry, an error occurred. Please try again."
 #                     message.status = 'normal'
-#                     message.updated_at = datetime.utcnow()
-#                     session = Session.query.filter_by(id=message.session_id).first()
-#                     if session:
-#                         session.timestamp = datetime.utcnow()
+#                     message.updated_at = datetime.now(timezone.utc)
+#                     if message.session:
+#                         message.session.timestamp = datetime.now(timezone.utc)
 #                 db.session.commit()
 #             else:
 #                 app.logger.debug("[Scheduler] No stalled messages found.")
@@ -806,15 +803,28 @@ def serve_react(path):
 
     return send_from_directory(app.static_folder, "index.html")
 
-@app.route('/login/user', methods=['POST'])
+@app.route('/login', methods=['POST'])
 @limiter.limit("10 per minute")
-def login_user():
+def login():
     data = request.get_json()
     username = data.get("email")
     password = data.get("password")
     if not username or not password:
-        return jsonify({"error": "Username and password are required"}), 400
-    user = User.query.filter_by(username=username).first()
+        return jsonify({"error": "Username/email and password are required"}), 400
+
+    # 1. Check if the user is an Admin
+    admin = Admin.query.filter_by(email=username).first()
+    if admin and check_password_hash(admin.password, password):
+        token = serializer.dumps({'user_email': username}, salt=app.config['SECURITY_PASSWORD_SALT'])
+        app.logger.info(f"Admin '{username}' logged in successfully.")
+        return jsonify({
+            "message": "Login successful",
+            "token": token,
+            "isAdmin": True
+        }), 200
+
+    # 2. Check if the user is a normal User
+    user = User.query.filter(or_(User.username == username, User.email == username)).first()
     if user and check_password_hash(user.password, password):
         token = serializer.dumps({'uid': user.id}, salt=app.config['SECURITY_PASSWORD_SALT'])
         app.logger.info(f"User '{username}' logged in successfully.")
@@ -823,28 +833,12 @@ def login_user():
             "token": token, 
             "uid": user.id,
             "allowed_to_create_connection": getattr(user, 'allowed_to_create_connection', True),
-            "allowed_to_create_public_connection": getattr(user, 'allowed_to_create_public_connection', True)
+            "allowed_to_create_public_connection": getattr(user, 'allowed_to_create_public_connection', True),
+            "isAdmin": False
         }), 200
-    
-    app.logger.warning(f"Failed login attempt for user: '{username}'.") # --- ADDED ---
-    return jsonify({"error": "Invalid credentials"}), 401
 
-@app.route('/login/admin', methods=['POST'])
-@limiter.limit("10 per minute")
-def login_admin():
-    data = request.get_json()
-    email = data.get('email')
-    password = data.get('password')
-    if not email or not password:
-        return jsonify({'message': 'Email and password are required'}), 400
-    admin = Admin.query.filter_by(email=email).first()
-    if admin and check_password_hash(admin.password, password):
-        token = serializer.dumps({'user_email': email}, salt=app.config['SECURITY_PASSWORD_SALT'])
-        app.logger.info(f"Admin '{email}' logged in successfully.") # --- ADDED ---
-        return jsonify({'token': token, 'isAdmin': True}), 200
-    
-    app.logger.warning(f"Failed login attempt for admin: '{email}'.") # --- ADDED ---
-    return jsonify({'message': 'Invalid credentials'}), 401
+    app.logger.warning(f"Failed login attempt for: '{username}'.")
+    return jsonify({"error": "Invalid credentials"}), 401
 
 @app.route('/validate-token', methods=['POST'])
 def validate_token():
@@ -1290,7 +1284,7 @@ def create_session():
 def get_sessions():
     try:
         uid = request.uid
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         filter_type = data.get('filter', 'all') # Get filter from request
         
         if not uid:
@@ -1299,7 +1293,7 @@ def get_sessions():
         # Base query
         query = Session.query.filter_by(uid=uid)
 
-        # Date Filtering Logic
+        # Date Filtering Logic (Ensuring Gapless Time Ranges)
         now_utc = datetime.now(timezone.utc)
         today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
         
@@ -1310,17 +1304,12 @@ def get_sessions():
             query = query.filter(and_(Session.timestamp >= yesterday_start, Session.timestamp < today_start))
         elif filter_type == 'last7days':
             seven_days_ago = today_start - timedelta(days=7)
-            # Exclude today/yesterday if you want strict ranges, 
-            # but usually "last 7 days" implies a range up to now. 
-            # Based on your previous frontend logic, it was 2 to 7 days ago.
-            # We will use the standard "past 7 days including today" or match your specific previous logic.
-            # Matching previous logic: 7 days ago up to 2 days ago
-            two_days_ago = today_start - timedelta(days=2)
-            query = query.filter(and_(Session.timestamp >= seven_days_ago, Session.timestamp <= two_days_ago))
+            yesterday_start = today_start - timedelta(days=1)
+            query = query.filter(and_(Session.timestamp >= seven_days_ago, Session.timestamp < yesterday_start))
         elif filter_type == 'last1month':
             thirty_days_ago = today_start - timedelta(days=30)
-            eight_days_ago = today_start - timedelta(days=8)
-            query = query.filter(and_(Session.timestamp >= thirty_days_ago, Session.timestamp <= eight_days_ago))
+            seven_days_ago = today_start - timedelta(days=7)
+            query = query.filter(and_(Session.timestamp >= thirty_days_ago, Session.timestamp < seven_days_ago))
         
         # Order by timestamp descending
         sessions = query.order_by(Session.timestamp.desc()).all()
@@ -1554,11 +1543,10 @@ def update_message(message_id):
             app.logger.warning(f"User {uid} failed to update message: Not found or unauthorized for message {message_id}.") # --- ADDED ---
             return jsonify({"error": "Message not found or unauthorized"}), 404
         
-        # --- MODIFIED: This query was redundant, already joined above ---
-        session = Session.query.filter_by(id=message.session_id, uid=uid).first()
+        # Access the relationship directly
+        session = message.session
         if not session:
-            # This check is technically redundant if the join succeeded, but good for safety.
-            app.logger.error(f"Data integrity issue: Message {message_id} found but session {message.session_id} not found for user {uid}.") # --- ADDED ---
+            app.logger.error(f"Data integrity issue: Message {message_id} found but session {message.session_id} not found for user {uid}.")
             return jsonify({"error": "Session not found or unauthorized"}), 404
         
         if content is not None:

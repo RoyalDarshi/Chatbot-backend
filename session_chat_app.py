@@ -2101,6 +2101,171 @@ def save_group_mapping(group_id):
         db.session.rollback()
         return jsonify({'error': 'Failed to save mapping'}), 500
 
+@app.route('/api/schema', methods=['POST'])
+@token_required
+def get_database_schema():
+    """
+    Fetch the real schema (tables and columns) for a saved connection.
+    Expects: { connectionId: number }
+    Returns: { schemas: [{ name, tables: [{ name, columns: [{ name, type }] }] }] }
+    """
+    try:
+        data = request.get_json()
+        connection_id = data.get('connectionId')
+        if not connection_id:
+            return jsonify({'error': 'connectionId is required'}), 400
+
+        uid = request.uid
+        # Fetch connection from DB — allow own, public, or group-shared connections
+        conn_record = ConnectionDetails.query.get(connection_id)
+        if not conn_record:
+            return jsonify({'error': 'Connection not found'}), 404
+
+        # Authorize: must be owner, public, or in a group the user belongs to
+        is_owner = conn_record.uid == uid
+        is_public = getattr(conn_record, 'isPublic', False)
+        user_group_ids = [ug.group_id for ug in UserGroup.query.filter_by(uid=uid).all()]
+        group_conn_ids = [gc.connection_id for gc in GroupConnection.query.filter(GroupConnection.group_id.in_(user_group_ids)).all()] if user_group_ids else []
+        is_group_shared = conn_record.id in group_conn_ids
+
+        if not (is_owner or is_public or is_group_shared):
+            return jsonify({'error': 'Access denied to this connection'}), 403
+
+        db_type = conn_record.selectedDB
+        hostname = conn_record.hostname
+        port = conn_record.port
+        database = conn_record.database
+        username = conn_record.username
+        encrypted_password = conn_record.password
+
+        # Decrypt password
+        try:
+            password = decrypt_password(encrypted_password)
+        except Exception:
+            password = encrypted_password  # fallback if not encrypted
+
+        schemas_result = []
+
+        if db_type == 'postgresql':
+            import psycopg2
+            pg_conn = None
+            try:
+                pg_conn = psycopg2.connect(
+                    host=hostname,
+                    port=port,
+                    dbname=database,
+                    user=username,
+                    password=password,
+                    connect_timeout=10
+                )
+                cursor = pg_conn.cursor()
+
+                # Get all schemas (excluding system schemas)
+                cursor.execute("""
+                    SELECT schema_name
+                    FROM information_schema.schemata
+                    WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast', 'pg_temp_1', 'pg_toast_temp_1')
+                    ORDER BY schema_name
+                """)
+                schema_rows = cursor.fetchall()
+
+                for (schema_name,) in schema_rows:
+                    # Get all tables in this schema
+                    cursor.execute("""
+                        SELECT table_name
+                        FROM information_schema.tables
+                        WHERE table_schema = %s
+                          AND table_type IN ('BASE TABLE', 'VIEW')
+                        ORDER BY table_name
+                    """, (schema_name,))
+                    table_rows = cursor.fetchall()
+
+                    tables_result = []
+                    for (table_name,) in table_rows:
+                        # Get columns for each table
+                        cursor.execute("""
+                            SELECT column_name, data_type
+                            FROM information_schema.columns
+                            WHERE table_schema = %s AND table_name = %s
+                            ORDER BY ordinal_position
+                        """, (schema_name, table_name))
+                        col_rows = cursor.fetchall()
+                        columns = [{'name': col_name, 'type': data_type} for col_name, data_type in col_rows]
+                        tables_result.append({'name': table_name, 'columns': columns})
+
+                    if tables_result:  # Only add schemas that have tables
+                        schemas_result.append({'name': schema_name, 'tables': tables_result})
+
+                cursor.close()
+            except Exception as e:
+                app.logger.error(f"Error fetching PostgreSQL schema for connection {connection_id}: {str(e)}", exc_info=True)
+                return jsonify({'error': f'Failed to fetch schema: {str(e)}'}), 500
+            finally:
+                if pg_conn:
+                    try:
+                        pg_conn.close()
+                    except Exception:
+                        pass
+
+        elif db_type == 'mysql':
+            try:
+                import mysql.connector
+                my_conn = mysql.connector.connect(
+                    host=hostname,
+                    port=port,
+                    database=database,
+                    user=username,
+                    password=password,
+                    connection_timeout=10
+                )
+                cursor = my_conn.cursor()
+                cursor.execute("SHOW TABLES")
+                table_rows = cursor.fetchall()
+                tables_result = []
+                for (table_name,) in table_rows:
+                    cursor.execute(f"DESCRIBE `{table_name}`")
+                    col_rows = cursor.fetchall()
+                    columns = [{'name': row[0], 'type': row[1]} for row in col_rows]
+                    tables_result.append({'name': table_name, 'columns': columns})
+                schemas_result.append({'name': database, 'tables': tables_result})
+                cursor.close()
+                my_conn.close()
+            except Exception as e:
+                app.logger.error(f"Error fetching MySQL schema for connection {connection_id}: {str(e)}", exc_info=True)
+                return jsonify({'error': f'Failed to fetch schema: {str(e)}'}), 500
+
+        elif db_type == 'mongodb':
+            try:
+                import pymongo
+                uri = f"mongodb://{username}:{password}@{hostname}:{port}/{database}"
+                client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=10000)
+                db_obj = client[database]
+                collection_names = db_obj.list_collection_names()
+                tables_result = []
+                for coll_name in sorted(collection_names):
+                    # Infer columns from a sample document
+                    sample = db_obj[coll_name].find_one()
+                    if sample:
+                        columns = [{'name': k, 'type': type(v).__name__} for k, v in sample.items()]
+                    else:
+                        columns = []
+                    tables_result.append({'name': coll_name, 'columns': columns})
+                schemas_result.append({'name': database, 'tables': tables_result})
+                client.close()
+            except Exception as e:
+                app.logger.error(f"Error fetching MongoDB schema for connection {connection_id}: {str(e)}", exc_info=True)
+                return jsonify({'error': f'Failed to fetch schema: {str(e)}'}), 500
+
+        else:
+            return jsonify({'error': f'Schema introspection not supported for database type: {db_type}'}), 400
+
+        return jsonify({'schemas': schemas_result}), 200
+
+    except Exception as e:
+        app.logger.error(f"Unexpected error in get_database_schema: {str(e)}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/testdbcon', methods=['POST'])
 def test_db_connection():
     try:

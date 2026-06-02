@@ -2016,6 +2016,36 @@ def get_recommended_questions():
         app.logger.error(f"Error in get_recommended_questions for user {request.uid}: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/favorites/bulk-delete', methods=['POST'])
+@token_required
+def bulk_delete_favorites():
+    try:
+        uid = request.uid
+        if not uid:
+            return jsonify({"error": "Invalid token, UID required"}), 401
+        
+        data = request.get_json() or {}
+        question_ids = data.get('question_ids', [])
+        if not question_ids:
+            return jsonify({"error": "question_ids are required"}), 400
+            
+        favorites = Favorite.query.filter(Favorite.question_id.in_(question_ids), Favorite.uid == uid).all()
+        valid_ids = [fav.question_id for fav in favorites]
+        
+        if not valid_ids:
+            return jsonify({"message": "No valid favorites found to delete", "deleted_ids": []}), 200
+            
+        Message.query.filter(Message.id.in_(valid_ids)).update({Message.is_favorited: False}, synchronize_session=False)
+        Favorite.query.filter(Favorite.question_id.in_(valid_ids), Favorite.uid == uid).delete(synchronize_session=False)
+        
+        db.session.commit()
+        app.logger.info(f"User {uid} bulk-deleted {len(valid_ids)} favorites.")
+        return jsonify({"message": f"Successfully deleted {len(valid_ids)} favorites", "deleted_ids": valid_ids}), 200
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error bulk-deleting favorites for user {request.uid}: {str(e)}", exc_info=True)
+        return jsonify({'error': 'Failed to bulk-delete favorites'}), 500
+
 @app.route('/api/user/settings', methods=['POST'])
 @token_required
 def get_user_settings():

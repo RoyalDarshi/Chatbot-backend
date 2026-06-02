@@ -515,6 +515,8 @@ class Session(db.Model):
     title = db.Column(db.String(255), nullable=False)
     connection_name = db.Column(db.String(255), nullable=False)
     con_id = db.Column(db.Integer, nullable=True)
+    is_pinned = db.Column(db.Boolean, default=False, nullable=False)
+    pinned_at = db.Column(db.DateTime, nullable=True)
     timestamp = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
@@ -652,6 +654,8 @@ def seed_initial_admin():
 def migrate_schema():
     try:
         from sqlalchemy import text
+        
+        # 1. User table patches
         try:
             db.session.execute(text('ALTER TABLE user ADD COLUMN allowed_to_create_connection BOOLEAN DEFAULT 1'))
             db.session.commit()
@@ -660,11 +664,51 @@ def migrate_schema():
             db.session.rollback()
 
         try:
+            db.session.execute(text('ALTER TABLE user ADD COLUMN allowed_to_create_public_connection BOOLEAN DEFAULT 1'))
+            db.session.commit()
+            app.logger.info("Migrated: Added allowed_to_create_public_connection to user")
+        except Exception:
+            db.session.rollback()
+
+        # 2. Connection Details patches
+        try:
             db.session.execute(text('ALTER TABLE connection_details ADD COLUMN isPublic BOOLEAN DEFAULT 0'))
             db.session.commit()
             app.logger.info("Migrated: Added isPublic to connection_details")
         except Exception:
             db.session.rollback()
+
+        # 3. Favorite patches (Fixes your current error)
+        try:
+            db.session.execute(text('ALTER TABLE favorite ADD COLUMN con_id INTEGER'))
+            db.session.commit()
+            app.logger.info("Migrated: Added con_id to favorite")
+        except Exception:
+            db.session.rollback()
+
+        # 4. Session patches (Proactive fix so it doesn't crash on chat loading next!)
+        try:
+            db.session.execute(text('ALTER TABLE session ADD COLUMN con_id INTEGER'))
+            db.session.commit()
+            app.logger.info("Migrated: Added con_id to session")
+        except Exception:
+            db.session.rollback()
+
+        # 5. Session pin fields
+        try:
+            db.session.execute(text('ALTER TABLE session ADD COLUMN is_pinned BOOLEAN DEFAULT 0'))
+            db.session.commit()
+            app.logger.info("Migrated: Added is_pinned to session")
+        except Exception:
+            db.session.rollback()
+
+        try:
+            db.session.execute(text('ALTER TABLE session ADD COLUMN pinned_at DATETIME'))
+            db.session.commit()
+            app.logger.info("Migrated: Added pinned_at to session")
+        except Exception:
+            db.session.rollback()
+
     except Exception as e:
         app.logger.error(f"Migration error: {e}")
 
@@ -1285,18 +1329,18 @@ def get_sessions():
     try:
         uid = request.uid
         data = request.get_json(silent=True) or {}
-        filter_type = data.get('filter', 'all') # Get filter from request
-        
+        filter_type = data.get('filter', 'all')  # time-range filter
+
         if not uid:
             return jsonify({"error": "Invalid token, UID required"}), 401
 
-        # Base query
+        # Base query — always scoped to the requesting user
         query = Session.query.filter_by(uid=uid)
 
-        # Date Filtering Logic (Ensuring Gapless Time Ranges)
+        # ── Time-range filter ────────────────────────────────────────
         now_utc = datetime.now(timezone.utc)
         today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-        
+
         if filter_type == 'today':
             query = query.filter(Session.timestamp >= today_start)
         elif filter_type == 'yesterday':
@@ -1310,40 +1354,75 @@ def get_sessions():
             thirty_days_ago = today_start - timedelta(days=30)
             seven_days_ago = today_start - timedelta(days=7)
             query = query.filter(and_(Session.timestamp >= thirty_days_ago, Session.timestamp < seven_days_ago))
-        
-        # Order by timestamp descending
+        # 'all' → no additional date filter
+
+        # ── Optional connection filter ───────────────────────────────
+        # The client may pass either a connection name string or a numeric con_id.
+        connection_name = data.get('connection_name')  # e.g. "MyPostgresDB"
+        con_id = data.get('con_id')                    # e.g. 3  (numeric id)
+
+        if connection_name:
+            query = query.filter(Session.connection_name == connection_name)
+        elif con_id is not None:
+            query = query.filter(Session.con_id == int(con_id))
+
+        # ── Execute ─────────────────────────────────────────────────
         sessions = query.order_by(Session.timestamp.desc()).all()
-        
+
         sessions_list = []
-        
+
         for session in sessions:
-            # OPTIMIZATION: Do not fetch all messages. 
-            # 1. Get Count
+            # Count messages without loading them
             msg_count = Message.query.filter_by(session_id=session.id).count()
 
-            # 2. Get Preview (First User Message)
-            # We explicitly look for a message that has content to use as a preview
-            first_msg = Message.query.filter(
+            # Preview: use the first BOT response.
+            # The session title already contains the user's first question,
+            # so showing the same text again as preview is redundant.
+            first_bot_msg = Message.query.filter(
                 Message.session_id == session.id,
+                Message.is_bot == True,
                 Message.content != None,
-                Message.content != ""
+                Message.content != "",
+                Message.status != 'loading'
             ).order_by(Message.timestamp.asc()).first()
-            
-            preview_text = "No messages"
-            if first_msg:
-                preview_text = first_msg.content[:60] + ("..." if len(first_msg.content) > 60 else "")
+
+            # Fallback: if there is no bot reply yet, use the user's first message
+            # but only if it doesn't equal the session title (avoids duplication).
+            preview_text = "No messages yet"
+            if first_bot_msg:
+                preview_text = first_bot_msg.content[:80] + ("..." if len(first_bot_msg.content) > 80 else "")
+            else:
+                first_user_msg = Message.query.filter(
+                    Message.session_id == session.id,
+                    Message.is_bot == False,
+                    Message.content != None,
+                    Message.content != ""
+                ).order_by(Message.timestamp.asc()).first()
+                if first_user_msg:
+                    user_content = first_user_msg.content.strip()
+                    # Only show if meaningfully different from the title
+                    if user_content.lower() not in session.title.lower() and session.title.lower() not in user_content.lower():
+                        preview_text = user_content[:80] + ("..." if len(user_content) > 80 else "")
 
             sessions_list.append({
                 "id": session.id,
                 "title": session.title,
                 "connection": session.connection_name,
+                "con_id": session.con_id,           # newly included
                 "timestamp": session.timestamp.isoformat(),
-                "messages": [], # Sending empty array to keep type consistency but save bandwidth
-                "messageCount": msg_count, # New field
-                "preview": preview_text    # New field
+                "messages": [],                      # empty for bandwidth savings
+                "messageCount": msg_count,
+                "preview": preview_text,
+                "is_pinned": session.is_pinned or False,
+                "pinned_at": session.pinned_at.isoformat() if session.pinned_at else None
             })
-            
+
+        app.logger.info(
+            f"Fetched {len(sessions_list)} sessions for user {uid} "
+            f"[filter={filter_type}, connection_name={connection_name}, con_id={con_id}]"
+        )
         return jsonify(sessions_list), 200
+
     except Exception as e:
         app.logger.error(f"Error fetching sessions for user {request.uid}: {str(e)}", exc_info=True)
         return jsonify({'error': 'Failed to fetch sessions'}), 500
@@ -1390,8 +1469,11 @@ def get_session(session_id):
             "id": session.id,
             "title": session.title,
             "connection": session.connection_name,
+            "con_id": session.con_id,
             "timestamp": session.timestamp.isoformat(),
-            "messages": messages_list
+            "messages": messages_list,
+            "is_pinned": session.is_pinned or False,
+            "pinned_at": session.pinned_at.isoformat() if session.pinned_at else None
         }), 200
     except Exception as e:
         app.logger.error(f"Error fetching session {session_id} for user {request.uid}: {str(e)}", exc_info=True)
@@ -1423,7 +1505,9 @@ def update_session(session_id):
             "id": session.id,
             "title": session.title,
             "timestamp": session.timestamp.isoformat(),
-            "messages": []
+            "messages": [],
+            "is_pinned": session.is_pinned or False,
+            "pinned_at": session.pinned_at.isoformat() if session.pinned_at else None
         }), 200
     except Exception as e:
         db.session.rollback()
@@ -1453,6 +1537,67 @@ def delete_session(session_id):
         db.session.rollback()
         app.logger.error(f"Error deleting session {session_id} for user {request.uid}: {str(e)}", exc_info=True)
         return jsonify({'error': 'Failed to delete session'}), 500
+
+@app.route('/api/sessions/<session_id>/pin', methods=['POST'])
+@token_required
+def toggle_pin_session(session_id):
+    try:
+        uid = request.uid
+        if not uid:
+            return jsonify({"error": "Invalid token, UID required"}), 401
+        
+        session = Session.query.filter_by(id=session_id, uid=uid).first()
+        if not session:
+            return jsonify({"error": "Session not found or unauthorized"}), 404
+        
+        session.is_pinned = not (session.is_pinned or False)
+        if session.is_pinned:
+            session.pinned_at = datetime.now(timezone.utc)
+        else:
+            session.pinned_at = None
+            
+        session.updated_at = datetime.now(timezone.utc)
+        db.session.commit()
+        app.logger.info(f"User {uid} {'pinned' if session.is_pinned else 'unpinned'} session '{session_id}'.")
+        return jsonify({
+            "id": session.id,
+            "is_pinned": session.is_pinned,
+            "pinned_at": session.pinned_at.isoformat() if session.pinned_at else None
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error toggling pin for session {session_id} for user {request.uid}: {str(e)}", exc_info=True)
+        return jsonify({'error': 'Failed to toggle pin'}), 500
+
+@app.route('/api/sessions/bulk-delete', methods=['POST'])
+@token_required
+def bulk_delete_sessions():
+    try:
+        uid = request.uid
+        if not uid:
+            return jsonify({"error": "Invalid token, UID required"}), 401
+        
+        data = request.get_json() or {}
+        session_ids = data.get('session_ids', [])
+        if not session_ids:
+            return jsonify({"error": "session_ids are required"}), 400
+            
+        sessions = Session.query.filter(Session.id.in_(session_ids), Session.uid == uid).all()
+        valid_ids = [s.id for s in sessions]
+        
+        if not valid_ids:
+            return jsonify({"message": "No valid sessions found to delete", "deleted_ids": []}), 200
+            
+        Message.query.filter(Message.session_id.in_(valid_ids)).delete(synchronize_session=False)
+        Session.query.filter(Session.id.in_(valid_ids)).delete(synchronize_session=False)
+        
+        db.session.commit()
+        app.logger.info(f"User {uid} bulk-deleted {len(valid_ids)} sessions.")
+        return jsonify({"message": f"Successfully deleted {len(valid_ids)} sessions", "deleted_ids": valid_ids}), 200
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error bulk-deleting sessions for user {request.uid}: {str(e)}", exc_info=True)
+        return jsonify({'error': 'Failed to bulk-delete sessions'}), 500
 
 @app.route('/api/messages', methods=['POST'])
 @token_required
